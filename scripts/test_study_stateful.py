@@ -173,7 +173,11 @@ def main() -> None:
         print("[i] missing in incremental:", ", ".join(missing_inc))
 
     combined = res_inc.reindex(df_full.index)
-    combined.loc[:split_ts, common_cols] = res_seed.loc[:split_ts, common_cols]
+    seed_block = res_seed.loc[:split_ts, common_cols].copy()
+    # Coerce object/None to numeric for safe assignment
+    for col in seed_block.columns:
+        seed_block[col] = pd.to_numeric(seed_block[col], errors="coerce")
+    combined.loc[:split_ts, common_cols] = seed_block
 
     # Compare combined last N rows
     compare_cols = [c for c in indicator_cols if c in combined.columns]
