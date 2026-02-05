@@ -344,7 +344,7 @@ SEED_REGISTRY["kama"] = _kama_seed
 class MCGDState:
     length: int
     c: float
-    prev: Optional[float] = None
+    prev_close: Optional[float] = None
 
 
 def _mcgd_init(params: Dict[str, Any]) -> MCGDState:
@@ -358,22 +358,22 @@ def _mcgd_update(
     state: MCGDState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], MCGDState]:
     x = bar["close"]
-    if state.prev is None:
+    if state.prev_close is None:
         # first bar -- no rolling-2 output yet
-        state.prev = x
+        state.prev_close = x
         return [None], state
-    prev = state.prev
+    prev = state.prev_close
     # guard against division by zero
     if prev == 0.0:
-        state.prev = x
-        return [x], state
+        state.prev_close = x
+        return [prev], state
     ratio = x / prev
     d = state.c * state.length * (ratio ** 4)
     if d == 0.0:
-        val = x
+        val = prev
     else:
         val = prev + (x - prev) / d
-    state.prev = val
+    state.prev_close = x
     return [val], state
 
 
@@ -384,12 +384,11 @@ def _mcgd_output_names(params: Dict[str, Any]) -> List[str]:
 
 def _mcgd_seed(series: Dict[str, Any], params: Dict[str, Any]) -> MCGDState:
     state = _mcgd_init(params)
-    col = _mcgd_output_names(params)[0]
-    s = series.get(col)
-    if s is not None:
-        last_valid = s.dropna()
+    close_s = series.get("close")
+    if close_s is not None:
+        last_valid = close_s.dropna()
         if len(last_valid) > 0:
-            state.prev = float(last_valid.iloc[-1])
+            state.prev_close = float(last_valid.iloc[-1])
     return state
 
 
@@ -1313,51 +1312,8 @@ def _supertrend_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _supertrend_seed(series: Dict[str, Any], params: Dict[str, Any]) -> SUPERTRENDState:
-    """internal_series seed: recover ATR state and direction/band state."""
-    length     = _as_int(_param(params, "length", 7), 7)
-    atr_length = _as_int(_param(params, "atr_length", length), length)
-    state      = _supertrend_init(params)
-    names      = _supertrend_output_names(params)
-
-    # direction from SUPERTd
-    d_s = series.get(names[1])
-    if d_s is not None:
-        lv = d_s.dropna()
-        if len(lv) > 0:
-            state.dir_prev = int(lv.iloc[-1])
-            state._started = True
-
-    # long / short bands
-    l_s = series.get(names[2])
-    s_s = series.get(names[3])
-    if l_s is not None:
-        lv = l_s.dropna()
-        if len(lv) > 0:
-            state.lb_prev = float(lv.iloc[-1])
-    if s_s is not None:
-        lv = s_s.dropna()
-        if len(lv) > 0:
-            state.ub_prev = float(lv.iloc[-1])
-
-    # ATR state: recover from high/low/close tails via replay
-    # (ATR internal state is too complex for simple extraction)
-    high_s  = series.get("high")
-    low_s   = series.get("low")
-    close_s = series.get("close")
-    if high_s is not None and low_s is not None and close_s is not None:
-        n = len(high_s)
-        atr_st = ATRState(length=atr_length)
-        for i in range(n):
-            import pandas as _pd
-            h = high_s.iloc[i]
-            lo = low_s.iloc[i]
-            cl = close_s.iloc[i]
-            if _pd.isna(h) or _pd.isna(lo) or _pd.isna(cl):
-                continue
-            _, atr_st = atr_update_raw(atr_st, float(h), float(lo), float(cl))
-        state.atr_state = atr_st
-
-    return state
+    """internal_series: replay for exact parity."""
+    return replay_seed("supertrend", series, params)
 
 
 STATEFUL_REGISTRY["supertrend"] = StatefulIndicator(
