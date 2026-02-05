@@ -822,8 +822,9 @@ def _rvi_update(
     diff = close - state.prev_close
     state.prev_close = close
 
-    pos = max(diff, 0.0)
-    neg = abs(min(diff, 0.0))
+    # Match vectorized unsigned_differences: use sign (1/0), not magnitude.
+    pos = 1.0 if diff > 0 else 0.0
+    neg = 1.0 if diff < 0 else 0.0
 
     # stdev needs a full window
     if len(state.close_buf) < state.close_buf.maxlen:  # type: ignore[arg-type]

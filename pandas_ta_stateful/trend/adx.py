@@ -105,6 +105,9 @@ def adx(
         adx = ADX(high, low, close, length)
         dmp = PLUS_DM(high, low, length)
         dmn = MINUS_DM(high, low, length)
+        # Scale DM to DI so DMP/DMN are consistent with non-talib path.
+        dmp = k * dmp
+        dmn = k * dmn
 
     elif mode_tv:
         # How to treat the initial value of RMA varies from one another.

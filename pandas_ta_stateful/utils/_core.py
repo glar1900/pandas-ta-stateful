@@ -239,15 +239,15 @@ def signed_series(x: Series, initial: Int, lag: Int = None) -> Series:
     Returns:
         (Series): 1 column
     """
-    initial = None
+    init_val = None
     if initial is not None and not isinstance(lag, str):
-        initial = initial
+        init_val = initial
     x = v_series(x)
     lag = v_pos_default(lag, 1)
     sign = x.diff(lag)
     sign[sign > 0] = 1
     sign[sign < 0] = -1
-    sign.iloc[0] = initial    # sign.iloc[:lag-1]
+    sign.iloc[0] = init_val    # sign.iloc[:lag-1]
     return sign
 
 

@@ -1195,7 +1195,7 @@ class CRSIState:
     rsi_state: RSIState
     streak_rsi_state: RSIState
     rank_length: int
-    close_buf: deque          # maxlen=rank_length, stores closes for percent_rank
+    pct_buf: deque            # maxlen=rank_length+1, stores pct_change values
     streak: int = 0           # current streak value
     prev_close: Optional[float] = None
 
@@ -1216,7 +1216,7 @@ def _crsi_init(params: Dict[str, Any]) -> CRSIState:
             avg_loss=rma_make(streak_length, presma=True),
         ),
         rank_length=rank_length,
-        close_buf=deque(maxlen=rank_length),
+        pct_buf=deque(maxlen=rank_length + 1),
     )
 
 
@@ -1224,12 +1224,13 @@ def _crsi_update(
     state: CRSIState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], CRSIState]:
     close = bar["close"]
+    prev_close = state.prev_close
 
     # --- Streak calculation ---
-    if state.prev_close is not None:
-        if close > state.prev_close:
+    if prev_close is not None:
+        if close > prev_close:
             state.streak = (state.streak + 1) if state.streak >= 0 else 1
-        elif close < state.prev_close:
+        elif close < prev_close:
             state.streak = (state.streak - 1) if state.streak <= 0 else -1
         # close == prev_close: streak stays at 0 if was 0, else resets
         else:
@@ -1247,11 +1248,21 @@ def _crsi_update(
     streak_rsi_val = streak_out[0]
 
     # --- Percent rank ---
-    state.close_buf.append(close)
+    pct_val: Optional[float] = None
+    if prev_close is not None and prev_close != 0.0:
+        pct_val = (close / prev_close) - 1.0
+    elif prev_close is not None:
+        pct_val = float("nan")
+    if pct_val is not None:
+        state.pct_buf.append(pct_val)
     pr_val: Optional[float] = None
-    if len(state.close_buf) >= state.rank_length:
-        # percent_rank: how many of the last rank_length closes are <= current close
-        count = sum(1 for c in state.close_buf if c <= close)
+    if len(state.pct_buf) >= state.rank_length + 1:
+        # percent_rank on pct_change window: count of previous values < current
+        last = state.pct_buf[-1]
+        count = 0
+        for v in list(state.pct_buf)[:-1]:
+            if v < last:
+                count += 1
         pr_val = 100.0 * count / state.rank_length
 
     # --- Combine ---

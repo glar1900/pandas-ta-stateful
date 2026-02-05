@@ -21,9 +21,9 @@ def nb_pvi(np_close, np_volume, initial):
     m = np_close.size
     for i in range(1, m):
         if np_volume[i] > np_volume[i - 1]:
-            result[i] = result[i - i] * (np_close[i] / np_close[i - 1])
+            result[i] = result[i - 1] * (np_close[i] / np_close[i - 1])
         else:
-            result[i] = result[i - i]
+            result[i] = result[i - 1]
 
     return result
 

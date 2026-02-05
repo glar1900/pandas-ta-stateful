@@ -138,14 +138,17 @@ def main() -> None:
     if missing_inc:
         print(f"[i] missing in incremental (ignored): {len(missing_inc)}")
 
-    combined = res_inc.copy()
+    combined = res_inc.reindex(df_full.index)
     combined.loc[:split_ts, common_cols] = res_seed.loc[:split_ts, common_cols]
 
     # Compare last N rows
     compare_idx = df_full.index[-args.tail :]
     compare_cols = [c for c in indicator_cols if c in combined.columns]
-    ref = df_study.loc[compare_idx, compare_cols]
-    test = combined.loc[compare_idx, compare_cols]
+    ref = df_study.loc[:, compare_cols]
+    test = combined.loc[:, compare_cols]
+    compare_idx = compare_idx.intersection(ref.index).intersection(test.index)
+    ref = ref.loc[compare_idx]
+    test = test.loc[compare_idx]
 
     summary = compare_frames(ref, test, args.eps)
 

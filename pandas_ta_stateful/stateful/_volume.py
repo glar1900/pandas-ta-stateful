@@ -44,7 +44,10 @@ def _obv_update(
     close = bar["close"]
     volume = bar["volume"]
 
-    if state.prev_close is not None:
+    if state.prev_close is None:
+        # Match vectorized OBV (and TA-Lib) behavior: first value = volume.
+        state.cumsum_value = volume
+    else:
         if close > state.prev_close:
             state.cumsum_value += volume
         elif close < state.prev_close:
