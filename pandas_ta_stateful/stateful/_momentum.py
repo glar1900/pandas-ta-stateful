@@ -47,13 +47,32 @@ from pandas_ta_stateful.maps import Imports
 # Supported: "ema" -> ema_make, "rma"/"smma"/"wilder" -> rma_make, "sma" -> SMA buffer.
 # ---------------------------------------------------------------------------
 
-def _ma_state_for_mode(mamode: str, length: int) -> EMAState:
-    """Return an EMAState appropriate for the requested mamode."""
+def _sma_buf_value(buf: deque) -> Optional[float]:
+    """Return the current SMA from a full deque, else None."""
+    if len(buf) < buf.maxlen:  # type: ignore[arg-type]
+        return None
+    return sum(buf) / len(buf)
+
+
+def _ma_state_for_mode(mamode: str, length: int) -> Any:
+    """Return a MA state appropriate for the requested mamode."""
     m = mamode.lower()
     if m in ("rma", "smma", "wilder"):
         return rma_make(length, presma=True)
+    if m == "sma":
+        return deque(maxlen=length)
     # default / "ema"
     return ema_make(length, presma=True)
+
+
+def _ma_state_update(state: Any, x: float, mamode: str) -> Tuple[Optional[float], Any]:
+    """Single-step update dispatched on mamode. Returns (value|None, state)."""
+    m = mamode.lower()
+    if m == "sma":
+        state.append(x)
+        return _sma_buf_value(state), state
+    # EMAState (ema / rma)
+    return ema_update_raw(state, x)
 
 
 # ===========================================================================
@@ -260,20 +279,19 @@ SEED_REGISTRY["rsi"] = _rsi_seed
 # APO  (output_only)
 # ===========================================================================
 # APO = MA(close, fast) - MA(close, slow)
-# Vectorised source default mamode="sma" but spec says mamode="ema".
-# We honour vectorised source default: mamode="ema" per task spec.
+# Vectorised source default mamode="sma".
 # Defaults: fast=12, slow=26
 
 @dataclass
 class APOState:
-    fast_ma: EMAState
-    slow_ma: EMAState
+    fast_ma: Any
+    slow_ma: Any
 
 
 def _apo_init(params: Dict[str, Any]) -> APOState:
     fast    = _as_int(_param(params, "fast",  12), 12)
     slow    = _as_int(_param(params, "slow",  26), 26)
-    mamode  = str(_param(params, "mamode", "ema"))
+    mamode  = str(_param(params, "mamode", "sma"))
     if slow < fast:
         fast, slow = slow, fast
     return APOState(
@@ -286,8 +304,9 @@ def _apo_update(
     state: APOState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], APOState]:
     x = bar["close"]
-    fv, state.fast_ma = ema_update_raw(state.fast_ma, x)
-    sv, state.slow_ma = ema_update_raw(state.slow_ma, x)
+    mamode = str(_param(params, "mamode", "sma"))
+    fv, state.fast_ma = _ma_state_update(state.fast_ma, x, mamode)
+    sv, state.slow_ma = _ma_state_update(state.slow_ma, x, mamode)
 
     if fv is not None and sv is not None:
         return [fv - sv], state
@@ -331,13 +350,13 @@ SEED_REGISTRY["apo"] = _apo_seed
 # PPO  = scalar * (MA(fast) - MA(slow)) / MA(slow)
 # Signal = EMA(PPO, signal)
 # Hist = PPO - Signal
-# Vectorised default mamode="sma"; task spec keeps mamode param.
-# Defaults: fast=12, slow=26, signal=9, scalar=100  (signal default=10 per spec)
+# Vectorised default mamode="sma".
+# Defaults: fast=12, slow=26, signal=9, scalar=100
 
 @dataclass
 class PPOState:
-    fast_ma: EMAState
-    slow_ma: EMAState
+    fast_ma: Any
+    slow_ma: Any
     signal_ema: EMAState
     scalar: float
 
@@ -345,9 +364,9 @@ class PPOState:
 def _ppo_init(params: Dict[str, Any]) -> PPOState:
     fast   = _as_int(_param(params, "fast",   12), 12)
     slow   = _as_int(_param(params, "slow",   26), 26)
-    signal = _as_int(_param(params, "signal", 10), 10)
+    signal = _as_int(_param(params, "signal", 9), 9)
     scalar = _as_float(_param(params, "scalar", 100.0), 100.0)
-    mamode = str(_param(params, "mamode", "ema"))
+    mamode = str(_param(params, "mamode", "sma"))
     if slow < fast:
         fast, slow = slow, fast
     return PPOState(
@@ -362,8 +381,9 @@ def _ppo_update(
     state: PPOState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], PPOState]:
     x = bar["close"]
-    fv, state.fast_ma  = ema_update_raw(state.fast_ma,  x)
-    sv, state.slow_ma  = ema_update_raw(state.slow_ma,  x)
+    mamode = str(_param(params, "mamode", "sma"))
+    fv, state.fast_ma = _ma_state_update(state.fast_ma, x, mamode)
+    sv, state.slow_ma = _ma_state_update(state.slow_ma, x, mamode)
 
     ppo_val:  Optional[float] = None
     sig_val:  Optional[float] = None
@@ -381,7 +401,7 @@ def _ppo_update(
 def _ppo_output_names(params: Dict[str, Any]) -> List[str]:
     fast   = _as_int(_param(params, "fast",   12), 12)
     slow   = _as_int(_param(params, "slow",   26), 26)
-    signal = _as_int(_param(params, "signal", 10), 10)
+    signal = _as_int(_param(params, "signal", 9), 9)
     if slow < fast:
         fast, slow = slow, fast
     p = f"_{fast}_{slow}_{signal}"
@@ -415,16 +435,16 @@ SEED_REGISTRY["ppo"] = _ppo_seed
 # BIAS  (output_only)
 # ===========================================================================
 # BIAS = (close / MA(close, length)) - 1
-# Defaults: mamode="ema", length=26
+# Defaults: mamode="sma", length=26
 
 @dataclass
 class BIASState:
-    ma_state: EMAState
+    ma_state: Any
 
 
 def _bias_init(params: Dict[str, Any]) -> BIASState:
     length = _as_int(_param(params, "length", 26), 26)
-    mamode = str(_param(params, "mamode", "ema"))
+    mamode = str(_param(params, "mamode", "sma"))
     return BIASState(ma_state=_ma_state_for_mode(mamode, length))
 
 
@@ -432,7 +452,8 @@ def _bias_update(
     state: BIASState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], BIASState]:
     x = bar["close"]
-    ma_val, state.ma_state = ema_update_raw(state.ma_state, x)
+    mamode = str(_param(params, "mamode", "sma"))
+    ma_val, state.ma_state = _ma_state_update(state.ma_state, x, mamode)
     if ma_val is not None and ma_val != 0.0:
         return [x / ma_val - 1.0], state
     return [None], state
@@ -440,7 +461,7 @@ def _bias_update(
 
 def _bias_output_names(params: Dict[str, Any]) -> List[str]:
     length = _as_int(_param(params, "length", 26), 26)
-    mamode = str(_param(params, "mamode", "ema"))
+    mamode = str(_param(params, "mamode", "sma"))
     # match vectorised naming: BIAS_EMA_26
     ma_tag = mamode.upper()
     return [f"BIAS_{ma_tag}_{length}"]
@@ -484,8 +505,8 @@ class DMState:
     length: int
     mamode: str
     use_talib: bool
-    dmp_ma: EMAState
-    dmn_ma: EMAState
+    dmp_ma: Any
+    dmn_ma: Any
     prev_high: Optional[float] = None
     prev_low:  Optional[float] = None
 
@@ -516,8 +537,8 @@ def _dm_update(
         state.prev_high = high
         state.prev_low  = low
         # Feed zeros into MA warmup
-        _, state.dmp_ma = ema_update_raw(state.dmp_ma, 0.0)
-        _, state.dmn_ma = ema_update_raw(state.dmn_ma, 0.0)
+        _, state.dmp_ma = _ma_state_update(state.dmp_ma, 0.0, state.mamode)
+        _, state.dmn_ma = _ma_state_update(state.dmn_ma, 0.0, state.mamode)
         return [None, None], state
 
     up = high - state.prev_high
@@ -528,8 +549,8 @@ def _dm_update(
     dmp = up  if (up > dn and up > 0) else 0.0
     dmn = dn  if (dn > up and dn > 0) else 0.0
 
-    p_val, state.dmp_ma = ema_update_raw(state.dmp_ma, dmp)
-    n_val, state.dmn_ma = ema_update_raw(state.dmn_ma, dmn)
+    p_val, state.dmp_ma = _ma_state_update(state.dmp_ma, dmp, state.mamode)
+    n_val, state.dmn_ma = _ma_state_update(state.dmn_ma, dmn, state.mamode)
 
     if p_val is not None and n_val is not None:
         if state.use_talib and state.mamode.lower() == "rma":
@@ -818,86 +839,139 @@ SEED_REGISTRY["exhc"] = _exhc_seed
 
 
 # ===========================================================================
-# TMO  (output_only)  -- Triple MA Oscillator (simplified stateful)
+# TMO  (output_only)  -- True Momentum Oscillator
 # ===========================================================================
-# Stateful interpretation per spec:
-#   delta = close - prev_close
-#   ema1  = EMA(delta, length)
-#   ema2  = EMA(ema1, length)   -- cascaded
-#   ema3  = EMA(ema2, length)   -- cascaded  (= main TMO line)
-#   smooth = EMA(ema3, length)  -- 4th EMA for the smooth line
-# Outputs: main (ema3), smooth (ema_smooth)
-# Defaults: length=5  (calc_length from vectorised source)
+# Vectorized reference:
+#   signed_diff_sum = sum_signed_rolling_deltas(open, close, tmo_length, exclusive)
+#   initial_ma = MA(signed_diff_sum, calc_length)
+#   main   = MA(initial_ma, smooth_length)
+#   smooth = MA(main, smooth_length)
+#   TMOM  = main - main.shift(tmo_length)   if momentum=True else 0
+#   TMOMs = smooth - smooth.shift(tmo_length) if momentum=True else 0
+# Defaults: tmo_length=14, calc_length=5, smooth_length=3, mamode="ema",
+#           momentum=False, exclusive=True
 
 @dataclass
 class TMOState:
-    ema1: EMAState
-    ema2: EMAState
-    ema3: EMAState       # main
-    ema_smooth: EMAState # smooth
-    prev_close: Optional[float] = None
+    tmo_length: int
+    calc_length: int
+    smooth_length: int
+    mamode: str
+    momentum: bool
+    exclusive: bool
+    window: int
+    open_buf: deque
+    ma1_state: Any
+    ma2_state: Any
+    ma3_state: Any
+    main_hist: deque
+    smooth_hist: deque
 
 
 def _tmo_init(params: Dict[str, Any]) -> TMOState:
-    length = _as_int(_param(params, "length", 5), 5)
+    tmo_length = _as_int(_param(params, "tmo_length", _param(params, "length", 14)), 14)
+    calc_length = _as_int(_param(params, "calc_length", 5), 5)
+    smooth_length = _as_int(_param(params, "smooth_length", 3), 3)
+    mamode = str(_param(params, "mamode", "ema"))
+    momentum = bool(_param(params, "momentum", False))
+    exclusive = bool(_param(params, "exclusive", True))
+
+    window = tmo_length if exclusive else max(tmo_length - 1, 1)
+
     return TMOState(
-        ema1=ema_make(length),
-        ema2=ema_make(length),
-        ema3=ema_make(length),
-        ema_smooth=ema_make(length),
+        tmo_length=tmo_length,
+        calc_length=calc_length,
+        smooth_length=smooth_length,
+        mamode=mamode,
+        momentum=momentum,
+        exclusive=exclusive,
+        window=window,
+        open_buf=deque(maxlen=window),
+        ma1_state=_ma_state_for_mode(mamode, calc_length),
+        ma2_state=_ma_state_for_mode(mamode, smooth_length),
+        ma3_state=_ma_state_for_mode(mamode, smooth_length),
+        main_hist=deque(maxlen=tmo_length + 1),
+        smooth_hist=deque(maxlen=tmo_length + 1),
     )
 
 
 def _tmo_update(
     state: TMOState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], TMOState]:
+    open_ = bar["open"]
     close = bar["close"]
 
-    if state.prev_close is None:
-        state.prev_close = close
-        return [None, None], state
+    # Sum of signed rolling deltas (exclusive/inclusive)
+    sum_sign: Optional[float] = None
+    if len(state.open_buf) >= state.window:
+        s = 0.0
+        for op in state.open_buf:
+            if close > op:
+                s += 1.0
+            elif close < op:
+                s -= 1.0
+        sum_sign = s
 
-    delta = close - state.prev_close
-    state.prev_close = close
+    # Update open buffer after computing sum
+    state.open_buf.append(open_)
 
-    v1, state.ema1 = ema_update_raw(state.ema1, delta)
-    if v1 is None:
-        return [None, None], state
+    # Initial MA chain
+    main_val: Optional[float] = None
+    smooth_val: Optional[float] = None
+    if sum_sign is not None:
+        ma1, state.ma1_state = _ma_state_update(state.ma1_state, sum_sign, state.mamode)
+        if ma1 is not None:
+            main_val, state.ma2_state = _ma_state_update(state.ma2_state, ma1, state.mamode)
+            if main_val is not None:
+                smooth_val, state.ma3_state = _ma_state_update(state.ma3_state, main_val, state.mamode)
 
-    v2, state.ema2 = ema_update_raw(state.ema2, v1)
-    if v2 is None:
-        return [None, None], state
+    # Momentum outputs
+    mom_main: Optional[float]
+    mom_smooth: Optional[float]
+    if not state.momentum:
+        mom_main = 0.0
+        mom_smooth = 0.0
+    else:
+        state.main_hist.append(main_val)
+        state.smooth_hist.append(smooth_val)
+        if len(state.main_hist) >= state.tmo_length + 1:
+            past_main = state.main_hist[0]
+            past_smooth = state.smooth_hist[0]
+            mom_main = None if past_main is None or main_val is None else main_val - past_main
+            mom_smooth = None if past_smooth is None or smooth_val is None else smooth_val - past_smooth
+        else:
+            mom_main = None
+            mom_smooth = None
 
-    v3, state.ema3 = ema_update_raw(state.ema3, v2)
-    if v3 is None:
-        return [None, None], state
-
-    vs, state.ema_smooth = ema_update_raw(state.ema_smooth, v3)
-    # main = v3, smooth = vs (may still be None during warmup)
-    return [v3, vs], state
+    return [main_val, smooth_val, mom_main, mom_smooth], state
 
 
 def _tmo_output_names(params: Dict[str, Any]) -> List[str]:
-    length = _as_int(_param(params, "length", 5), 5)
-    return [f"TMO_{length}", f"TMOs_{length}"]
+    tmo_length = _as_int(_param(params, "tmo_length", _param(params, "length", 14)), 14)
+    calc_length = _as_int(_param(params, "calc_length", 5), 5)
+    smooth_length = _as_int(_param(params, "smooth_length", 3), 3)
+    props = f"_{tmo_length}_{calc_length}_{smooth_length}"
+    return [f"TMO{props}", f"TMOs{props}", f"TMOM{props}", f"TMOMs{props}"]
 
 
 def _tmo_seed(series: Dict[str, Any], params: Dict[str, Any]) -> TMOState:
     state = _tmo_init(params)
+    open_s = series.get("open")
     close_s = series.get("close")
-    if close_s is not None:
+    if open_s is not None and close_s is not None:
         import pandas as _pd
         for i in range(len(close_s)):
-            v = close_s.iloc[i]
-            if _pd.isna(v):
+            o = open_s.iloc[i]
+            c = close_s.iloc[i]
+            if _pd.isna(o) or _pd.isna(c):
                 continue
-            _, state = _tmo_update(state, {"close": float(v)}, params)
+            _, state = _tmo_update(state, {"open": float(o), "close": float(c)}, params)
     return state
 
 
 STATEFUL_REGISTRY["tmo"] = StatefulIndicator(
     kind="tmo",
-    inputs=("close",),
+    inputs=("open", "close"),
     init=_tmo_init,
     update=_tmo_update,
     output_names=_tmo_output_names,

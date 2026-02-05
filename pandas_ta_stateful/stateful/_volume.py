@@ -20,6 +20,42 @@ from ._base import (
     replay_seed,
 )
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _sma_buf_value(buf: deque) -> Optional[float]:
+    """Return the current SMA from a full deque, else None."""
+    if len(buf) < buf.maxlen:  # type: ignore[arg-type]
+        return None
+    return sum(buf) / len(buf)
+
+
+def _ma_state_make(mamode: str, length: int) -> Any:
+    """Factory: returns EMAState for ema/rma, or a fresh deque for sma."""
+    mode = mamode.lower()
+    if mode == "rma":
+        return rma_make(length, presma=True)
+    if mode == "sma":
+        return deque(maxlen=length)
+    return ema_make(length, presma=True)
+
+
+def _ma_state_update(state: Any, x: float, mamode: str) -> Tuple[Optional[float], Any]:
+    """Single-step update dispatched on mamode. Returns (value|None, state)."""
+    mode = mamode.lower()
+    if mode == "sma":
+        state.append(x)
+        return _sma_buf_value(state), state
+    return ema_update_raw(state, x)
+
+
+def _fmt_num(val: Any) -> Any:
+    if isinstance(val, float) and float(val).is_integer():
+        return int(val)
+    return val
+
 
 # ===========================================================================
 # OBV – On Balance Volume
@@ -140,11 +176,13 @@ SEED_REGISTRY["ad"] = _ad_seed
 @dataclass
 class PVTState:
     cumsum_value: float = 0.0
-    prev_close: Optional[float] = None
+    drift: int = 1
+    close_buf: deque = field(default_factory=deque)
 
 
 def _pvt_init(params: Dict[str, Any]) -> PVTState:
-    return PVTState()
+    drift = _as_int(_param(params, "drift", 1), 1)
+    return PVTState(drift=drift, close_buf=deque(maxlen=drift + 1))
 
 
 def _pvt_update(
@@ -153,12 +191,15 @@ def _pvt_update(
     close  = bar["close"]
     volume = bar["volume"]
 
-    if state.prev_close is not None and state.prev_close != 0.0:
-        roc = (close - state.prev_close) / state.prev_close * 100.0
-        state.cumsum_value += roc * volume
+    state.close_buf.append(close)
+    if len(state.close_buf) > state.drift:
+        prev_close = state.close_buf[0]
+        if prev_close != 0.0:
+            roc = (close - prev_close) / prev_close * 100.0
+            state.cumsum_value += roc * volume
+        return [state.cumsum_value], state
 
-    state.prev_close = close
-    return [state.cumsum_value], state
+    return [None], state
 
 
 def _pvt_output_names(params: Dict[str, Any]) -> List[str]:
@@ -273,14 +314,26 @@ SEED_REGISTRY["nvi"] = _nvi_seed
 
 @dataclass
 class PVIState:
-    cumsum_value: float = 0.0          # current PVI value
+    length: int
+    mamode: str
+    overlay: bool
+    ma_state: Any
+    pvi_value: float = 0.0          # current PVI value
     prev_volume: Optional[float] = None
     prev_close: Optional[float] = None
     _first_bar: bool = True
 
 
 def _pvi_init(params: Dict[str, Any]) -> PVIState:
-    return PVIState()
+    length = _as_int(_param(params, "length", 255), 255)
+    mamode = str(_param(params, "mamode", "ema"))
+    overlay = bool(_param(params, "overlay", False))
+    return PVIState(
+        length=length,
+        mamode=mamode,
+        overlay=overlay,
+        ma_state=_ma_state_make(mamode, length),
+    )
 
 
 def _pvi_update(
@@ -291,23 +344,30 @@ def _pvi_update(
     initial = _as_float(_param(params, "initial", 100), 100.0)
 
     if state._first_bar:
-        state.cumsum_value = initial
+        if state.overlay:
+            initial = close
+        state.pvi_value = initial
         state.prev_volume = volume
         state.prev_close = close
         state._first_bar = False
-        return [state.cumsum_value], state
+        ma_val, state.ma_state = _ma_state_update(state.ma_state, state.pvi_value, state.mamode)
+        return [state.pvi_value, ma_val], state
 
     if volume > state.prev_volume and state.prev_close != 0.0:
-        state.cumsum_value = state.cumsum_value * (close / state.prev_close)
+        state.pvi_value = state.pvi_value * (close / state.prev_close)
     # else: value stays the same
 
     state.prev_volume = volume
     state.prev_close = close
-    return [state.cumsum_value], state
+    ma_val, state.ma_state = _ma_state_update(state.ma_state, state.pvi_value, state.mamode)
+    return [state.pvi_value, ma_val], state
 
 
 def _pvi_output_names(params: Dict[str, Any]) -> List[str]:
-    return ["PVI"]
+    length = _as_int(_param(params, "length", 255), 255)
+    mamode = str(_param(params, "mamode", "ema"))
+    _mode = mamode.lower()[0] if len(mamode) else ""
+    return ["PVI", f"PVI{_mode}_{length}"]
 
 
 def _pvi_seed(inputs: Dict[str, Any], params: Dict[str, Any]) -> PVIState:
@@ -458,10 +518,14 @@ SEED_REGISTRY["adosc"] = _adosc_seed
 class AOBVState:
     obv_cumsum: float = 0.0
     prev_close: Optional[float] = None
-    fast_ma: EMAState = None         # type: ignore[assignment]
-    slow_ma: EMAState = None         # type: ignore[assignment]
+    mamode: str = "ema"
+    run_length: int = 2
+    fast_ma: Any = None         # EMAState or deque
+    slow_ma: Any = None         # EMAState or deque
     rolling_min_buf: deque = field(default_factory=deque)
     rolling_max_buf: deque = field(default_factory=deque)
+    fast_hist: deque = field(default_factory=deque)
+    slow_hist: deque = field(default_factory=deque)
     _min_lookback: int = 2
     _max_lookback: int = 2
 
@@ -471,13 +535,19 @@ def _aobv_init(params: Dict[str, Any]) -> AOBVState:
     slow       = _as_int(_param(params, "slow", 12), 12)
     min_lb     = _as_int(_param(params, "min_lookback", 2), 2)
     max_lb     = _as_int(_param(params, "max_lookback", 2), 2)
+    run_length = _as_int(_param(params, "run_length", 2), 2)
+    mamode     = str(_param(params, "mamode", "ema"))
     if slow < fast:
         fast, slow = slow, fast
     return AOBVState(
-        fast_ma=ema_make(fast),
-        slow_ma=ema_make(slow),
+        mamode=mamode,
+        run_length=run_length,
+        fast_ma=_ma_state_make(mamode, fast),
+        slow_ma=_ma_state_make(mamode, slow),
         rolling_min_buf=deque(maxlen=min_lb),
         rolling_max_buf=deque(maxlen=max_lb),
+        fast_hist=deque(maxlen=run_length + 1),
+        slow_hist=deque(maxlen=run_length + 1),
         _min_lookback=min_lb,
         _max_lookback=max_lb,
     )
@@ -490,7 +560,10 @@ def _aobv_update(
     volume = bar["volume"]
 
     # --- OBV step ---
-    if state.prev_close is not None:
+    if state.prev_close is None:
+        # Match vectorized OBV behavior: first value = volume
+        state.obv_cumsum = volume
+    else:
         if close > state.prev_close:
             state.obv_cumsum += volume
         elif close < state.prev_close:
@@ -502,14 +575,27 @@ def _aobv_update(
     # --- Rolling min / max buffers (on OBV values) ---
     state.rolling_min_buf.append(obv_val)
     state.rolling_max_buf.append(obv_val)
-    obv_min = min(state.rolling_min_buf)
-    obv_max = max(state.rolling_max_buf)
+    obv_min = min(state.rolling_min_buf) if len(state.rolling_min_buf) == state._min_lookback else None
+    obv_max = max(state.rolling_max_buf) if len(state.rolling_max_buf) == state._max_lookback else None
 
     # --- Fast / Slow MA on OBV ---
-    fast_val, state.fast_ma = ema_update_raw(state.fast_ma, obv_val)
-    slow_val, state.slow_ma = ema_update_raw(state.slow_ma, obv_val)
+    fast_val, state.fast_ma = _ma_state_update(state.fast_ma, obv_val, state.mamode)
+    slow_val, state.slow_ma = _ma_state_update(state.slow_ma, obv_val, state.mamode)
 
-    return [obv_val, obv_min, obv_max, fast_val, slow_val], state
+    long_run: Optional[int] = None
+    short_run: Optional[int] = None
+    if fast_val is not None and slow_val is not None:
+        state.fast_hist.append(fast_val)
+        state.slow_hist.append(slow_val)
+        if len(state.fast_hist) >= state.run_length + 1:
+            inc_fast = (state.fast_hist[-1] - state.fast_hist[0]) > 0
+            dec_fast = (state.fast_hist[-1] - state.fast_hist[0]) < 0
+            inc_slow = (state.slow_hist[-1] - state.slow_hist[0]) > 0
+            dec_slow = (state.slow_hist[-1] - state.slow_hist[0]) < 0
+            long_run = int(inc_fast and (dec_slow or inc_slow))
+            short_run = int(dec_fast and (inc_slow or dec_slow))
+
+    return [obv_val, obv_min, obv_max, fast_val, slow_val, long_run, short_run], state
 
 
 def _aobv_output_names(params: Dict[str, Any]) -> List[str]:
@@ -517,6 +603,7 @@ def _aobv_output_names(params: Dict[str, Any]) -> List[str]:
     slow   = _as_int(_param(params, "slow", 12), 12)
     min_lb = _as_int(_param(params, "min_lookback", 2), 2)
     max_lb = _as_int(_param(params, "max_lookback", 2), 2)
+    run_length = _as_int(_param(params, "run_length", 2), 2)
     if slow < fast:
         fast, slow = slow, fast
     mamode = str(_param(params, "mamode", "ema")).lower()
@@ -527,6 +614,8 @@ def _aobv_output_names(params: Dict[str, Any]) -> List[str]:
         f"OBV_max_{max_lb}",
         f"OBV{_mode}_{fast}",
         f"OBV{_mode}_{slow}",
+        f"AOBV_LR_{run_length}",
+        f"AOBV_SR_{run_length}",
     ]
 
 

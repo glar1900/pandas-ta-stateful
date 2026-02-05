@@ -34,6 +34,12 @@ def _sma_buf_value(buf: deque) -> Optional[float]:
     return sum(buf) / len(buf)
 
 
+def _fmt_num(val: Any) -> Any:
+    if isinstance(val, float) and float(val).is_integer():
+        return int(val)
+    return val
+
+
 def _ma_state_make(mamode: str, length: int) -> Any:
     """Factory: returns EMAState for ema/rma, or a fresh deque for sma."""
     mode = mamode.lower()
@@ -142,6 +148,7 @@ SEED_REGISTRY["decay"] = _decay_seed
 class ADXState:
     length: int
     signal_length: int
+    adxr_length: int
     scalar: float
     mamode: str
     use_talib: bool
@@ -149,6 +156,7 @@ class ADXState:
     pos_ma_state: Any       # EMAState or deque
     neg_ma_state: Any
     dx_ma_state: Any
+    adx_buf: deque
     prev_high: Optional[float] = None
     prev_low: Optional[float] = None
 
@@ -156,6 +164,7 @@ class ADXState:
 def _adx_init(params: Dict[str, Any]) -> ADXState:
     length = _as_int(_param(params, "length", 14), 14)
     signal_length = _as_int(_param(params, "signal_length", length), length)
+    adxr_length = _as_int(_param(params, "adxr_length", 2), 2)
     scalar = _as_float(_param(params, "scalar", 100), 100.0)
     mamode = str(_param(params, "mamode", "rma"))
     use_talib = bool(_param(params, "talib", True)) and Imports.get("talib", False)
@@ -165,6 +174,7 @@ def _adx_init(params: Dict[str, Any]) -> ADXState:
     return ADXState(
         length=length,
         signal_length=signal_length,
+        adxr_length=adxr_length,
         scalar=scalar,
         mamode=mamode,
         use_talib=use_talib,
@@ -172,6 +182,7 @@ def _adx_init(params: Dict[str, Any]) -> ADXState:
         pos_ma_state=_ma_state_make(mamode, length),
         neg_ma_state=_ma_state_make(mamode, length),
         dx_ma_state=_ma_state_make(mamode, signal_length),
+        adx_buf=deque(maxlen=adxr_length + 1),
     )
 
 
@@ -206,7 +217,7 @@ def _adx_update(
     dmn_val, state.neg_ma_state = _ma_state_update(state.neg_ma_state, neg, state.mamode)
 
     if dmp_val is None or dmn_val is None:
-        return [None, None, None], state
+        return [None, None, None, None], state
 
     if state.use_talib and state.mamode.lower() == "rma":
         # TA-Lib PLUS_DM/MINUS_DM uses Wilder-smoothed SUM. Multiply by length.
@@ -222,14 +233,25 @@ def _adx_update(
 
     # ADX (smoothed DX)
     adx_val, state.dx_ma_state = _ma_state_update(state.dx_ma_state, dx, state.mamode)
+    adxr_val: Optional[float] = None
+    if adx_val is not None:
+        state.adx_buf.append(adx_val)
+        if len(state.adx_buf) >= state.adxr_length + 1:
+            adxr_val = 0.5 * (adx_val + state.adx_buf[0])
 
-    return [adx_val, dmp, dmn], state
+    return [adx_val, adxr_val, dmp, dmn], state
 
 
 def _adx_output_names(params: Dict[str, Any]) -> List[str]:
     length = _as_int(_param(params, "length", 14), 14)
     signal_length = _as_int(_param(params, "signal_length", length), length)
-    return [f"ADX_{signal_length}", f"DMP_{length}", f"DMN_{length}"]
+    adxr_length = _as_int(_param(params, "adxr_length", 2), 2)
+    return [
+        f"ADX_{signal_length}",
+        f"ADXR_{signal_length}_{adxr_length}",
+        f"DMP_{length}",
+        f"DMN_{length}",
+    ]
 
 
 def _adx_seed(series: Dict[str, Any], params: Dict[str, Any]) -> ADXState:
@@ -250,105 +272,151 @@ SEED_REGISTRY["adx"] = _adx_seed
 # ===========================================================================
 # ALPHATREND  (internal_series)
 # ===========================================================================
-# State: atr_state, rsi_state (or mfi_state), prev_at
-# Default: length=14, multiplier=1, threshold=50
+# Vectorized reference uses:
+#   ATR(high, low, close, length, mamode)
+#   MFI if volume provided, else RSI(src, length, mamode)
+#   lag = 2
+# Outputs: ALPHAT, ALPHATl
 
 @dataclass
 class AlphatrendState:
     length: int
     multiplier: float
     threshold: float
-    atr_state: ATRState
-    # For RSI (when no volume)
-    rsi_avg_gain: Optional[EMAState] = None
-    rsi_avg_loss: Optional[EMAState] = None
-    rsi_prev_close: Optional[float] = None
-    # Previous alphatrend value
-    prev_at: float = 0.0
+    lag: int
+    mamode: str
+    src: str
+    tr_ma_state: Any
+    prev_close: Optional[float] = None
+    # RSI components (used when no volume)
+    prev_src: Optional[float] = None
+    gain_state: Any = None
+    loss_state: Any = None
+    # MFI components (used when volume is provided)
+    prev_tp: Optional[float] = None
+    pos_buf: deque = field(default_factory=deque)
+    neg_buf: deque = field(default_factory=deque)
+    pos_sum: float = 0.0
+    neg_sum: float = 0.0
+    # Alphatrend history
+    prev_at: Optional[float] = None
+    at_hist: deque = field(default_factory=deque)
 
 
 def _alphatrend_init(params: Dict[str, Any]) -> AlphatrendState:
     length = _as_int(_param(params, "length", 14), 14)
     multiplier = _as_float(_param(params, "multiplier", 1), 1.0)
     threshold = _as_float(_param(params, "threshold", 50), 50.0)
-    mamode = str(_param(params, "mamode", "rma"))
+    lag = _as_int(_param(params, "lag", 2), 2)
+    mamode = str(_param(params, "mamode", "sma"))
+    src = str(_param(params, "src", "close")).lower()
 
     state = AlphatrendState(
         length=length,
         multiplier=multiplier,
         threshold=threshold,
-        atr_state=ATRState(length=length, percent=False),
+        lag=lag,
+        mamode=mamode,
+        src=src,
+        tr_ma_state=_ma_state_make(mamode, length),
+        gain_state=_ma_state_make(mamode, length),
+        loss_state=_ma_state_make(mamode, length),
+        pos_buf=deque(maxlen=length),
+        neg_buf=deque(maxlen=length),
+        at_hist=deque(maxlen=lag + 1),
     )
-
-    # Initialize RSI components (we'll assume no volume for stateful mode)
-    state.rsi_avg_gain = rma_make(length, presma=True)
-    state.rsi_avg_loss = rma_make(length, presma=True)
-
     return state
 
 
 def _alphatrend_update(
     state: AlphatrendState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], AlphatrendState]:
+    open_ = bar["open"]
     high, low, close = bar["high"], bar["low"], bar["close"]
+    volume = bar.get("volume")
 
-    # ATR calculation
-    atr_val, state.atr_state = atr_update_raw(state.atr_state, high, low, close)
+    # ATR calculation (TR -> MA)
+    if state.prev_close is None:
+        tr = high - low
+    else:
+        tr = max(high - low, abs(high - state.prev_close), abs(low - state.prev_close))
+    state.prev_close = close
+    atr_val, state.tr_ma_state = _ma_state_update(state.tr_ma_state, tr, state.mamode)
 
-    if atr_val is None:
-        return [None], state
+    # Momentum (MFI if volume present, else RSI on src)
+    momo_val: Optional[float] = None
+    if volume is not None:
+        tp = (high + low + close) / 3.0
+        if state.prev_tp is not None:
+            mf = tp * volume
+            pos_flow = mf if tp > state.prev_tp else 0.0
+            neg_flow = mf if tp < state.prev_tp else 0.0
+            if len(state.pos_buf) == state.pos_buf.maxlen:  # type: ignore[arg-type]
+                state.pos_sum -= state.pos_buf[0]
+            if len(state.neg_buf) == state.neg_buf.maxlen:  # type: ignore[arg-type]
+                state.neg_sum -= state.neg_buf[0]
+            state.pos_buf.append(pos_flow)
+            state.neg_buf.append(neg_flow)
+            state.pos_sum += pos_flow
+            state.neg_sum += neg_flow
+            if len(state.pos_buf) >= state.length:
+                denom = state.pos_sum + state.neg_sum
+                momo_val = 100.0 * state.pos_sum / denom if denom != 0.0 else 50.0
+        state.prev_tp = tp
+    else:
+        src_val = close
+        if state.src == "open":
+            src_val = open_
+        elif state.src == "high":
+            src_val = high
+        elif state.src == "low":
+            src_val = low
+        if state.prev_src is not None:
+            diff = src_val - state.prev_src
+            gain = diff if diff > 0 else 0.0
+            loss = -diff if diff < 0 else 0.0
+            avg_gain, state.gain_state = _ma_state_update(state.gain_state, gain, state.mamode)
+            avg_loss, state.loss_state = _ma_state_update(state.loss_state, loss, state.mamode)
+            if avg_gain is not None and avg_loss is not None:
+                denom = avg_gain + avg_loss
+                momo_val = 100.0 * avg_gain / denom if denom != 0.0 else 50.0
+        state.prev_src = src_val
+
+    if atr_val is None or momo_val is None:
+        # Maintain lag alignment even during warmup
+        state.at_hist.append(None)
+        atl = state.at_hist[0] if len(state.at_hist) >= state.lag + 1 else None
+        return [None, atl], state
 
     lower_atr = low - atr_val * state.multiplier
     upper_atr = high + atr_val * state.multiplier
 
-    # RSI calculation (simplified - using close)
-    rsi_val = None
-    if state.rsi_prev_close is not None:
-        diff = close - state.rsi_prev_close
-        gain = diff if diff > 0 else 0.0
-        loss = -diff if diff < 0 else 0.0
+    momo_threshold = momo_val >= state.threshold
 
-        avg_gain, state.rsi_avg_gain = ema_update_raw(state.rsi_avg_gain, gain)
-        avg_loss, state.rsi_avg_loss = ema_update_raw(state.rsi_avg_loss, loss)
-
-        if avg_gain is not None and avg_loss is not None:
-            if avg_loss == 0.0:
-                rsi_val = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                rsi_val = 100.0 - (100.0 / (1.0 + rs))
-
-    state.rsi_prev_close = close
-
-    if rsi_val is None:
-        return [None], state
-
-    # Alphatrend logic
-    momo_threshold = rsi_val >= state.threshold
-
-    if state.prev_at == 0.0:
-        # First valid value
+    at_val: Optional[float]
+    if state.prev_at is None:
+        # First valid value -> set prev, but output NaN (matches vectorized)
         state.prev_at = lower_atr if momo_threshold else upper_atr
+        at_val = None
     else:
         if momo_threshold:
-            if lower_atr < state.prev_at:
-                state.prev_at = state.prev_at
-            else:
-                state.prev_at = lower_atr
+            at_val = state.prev_at if lower_atr < state.prev_at else lower_atr
         else:
-            if upper_atr > state.prev_at:
-                state.prev_at = state.prev_at
-            else:
-                state.prev_at = upper_atr
+            at_val = state.prev_at if upper_atr > state.prev_at else upper_atr
+        state.prev_at = at_val
 
-    return [state.prev_at], state
+    state.at_hist.append(at_val)
+    atl = state.at_hist[0] if len(state.at_hist) >= state.lag + 1 else None
+    return [at_val, atl], state
 
 
 def _alphatrend_output_names(params: Dict[str, Any]) -> List[str]:
     length = _as_int(_param(params, "length", 14), 14)
-    multiplier = _as_float(_param(params, "multiplier", 1), 1.0)
-    threshold = _as_float(_param(params, "threshold", 50), 50.0)
-    return [f"ALPHAT_{length}_{multiplier}_{threshold}"]
+    multiplier = _fmt_num(_as_float(_param(params, "multiplier", 1), 1.0))
+    threshold = _fmt_num(_as_float(_param(params, "threshold", 50), 50.0))
+    lag = _as_int(_param(params, "lag", 2), 2)
+    props = f"_{length}_{multiplier}_{threshold}"
+    return [f"ALPHAT{props}", f"ALPHATl{props}_{lag}"]
 
 
 def _alphatrend_seed(series: Dict[str, Any], params: Dict[str, Any]) -> AlphatrendState:
@@ -358,7 +426,7 @@ def _alphatrend_seed(series: Dict[str, Any], params: Dict[str, Any]) -> Alphatre
 
 STATEFUL_REGISTRY["alphatrend"] = StatefulIndicator(
     kind="alphatrend",
-    inputs=("high", "low", "close"),
+    inputs=("open", "high", "low", "close", "volume"),
     init=_alphatrend_init,
     update=_alphatrend_update,
     output_names=_alphatrend_output_names,
@@ -442,7 +510,7 @@ def _amat_output_names(params: Dict[str, Any]) -> List[str]:
     slow = _as_int(_param(params, "slow", 21), 21)
     lookback = _as_int(_param(params, "lookback", 2), 2)
     mamode = str(_param(params, "mamode", "ema"))
-    prefix = mamode[0].upper() if mamode else "E"
+    prefix = mamode[0].lower() if mamode else "e"
     props = f"_{fast}_{slow}_{lookback}"
     return [f"AMAT{prefix}_LR{props}", f"AMAT{prefix}_SR{props}"]
 
@@ -474,7 +542,8 @@ class CkspState:
     x: float
     q: int
     mamode: str
-    atr_state: ATRState
+    tr_ma_state: Any
+    prev_close: Optional[float] = None
     high_buf: deque = field(default_factory=lambda: deque(maxlen=10))
     low_buf: deque = field(default_factory=lambda: deque(maxlen=10))
     long_stop_buf: deque = field(default_factory=lambda: deque(maxlen=9))
@@ -482,14 +551,18 @@ class CkspState:
 
 
 def _cksp_init(params: Dict[str, Any]) -> CkspState:
+    tvmode_param = params.get("tvmode", None)
+    mode_tv = bool(_param(params, "tvmode", True))
     p = _as_int(_param(params, "p", 10), 10)
-    x = _as_float(_param(params, "x", 1), 1.0)
-    q = _as_int(_param(params, "q", 9), 9)
-    mamode = str(_param(params, "mamode", "rma"))
+    x_param = params.get("x", None)
+    q_param = params.get("q", None)
+    x = float(x_param) if isinstance(x_param, float) and x_param > 0 else (1.0 if tvmode_param is True else 3.0)
+    q = int(q_param) if isinstance(q_param, float) and q_param > 0 else (9 if tvmode_param is True else 20)
+    mamode = str(_param(params, "mamode", "rma" if mode_tv else "sma"))
 
     state = CkspState(
         p=p, x=x, q=q, mamode=mamode,
-        atr_state=ATRState(length=p, percent=False),
+        tr_ma_state=_ma_state_make(mamode, p),
     )
     state.high_buf = deque(maxlen=p)
     state.low_buf = deque(maxlen=p)
@@ -504,8 +577,13 @@ def _cksp_update(
 ) -> Tuple[List[Optional[float]], CkspState]:
     high, low, close = bar["high"], bar["low"], bar["close"]
 
-    # ATR calculation
-    atr_val, state.atr_state = atr_update_raw(state.atr_state, high, low, close)
+    # ATR calculation (TR -> MA)
+    if state.prev_close is None:
+        tr = high - low
+    else:
+        tr = max(high - low, abs(high - state.prev_close), abs(low - state.prev_close))
+    state.prev_close = close
+    atr_val, state.tr_ma_state = _ma_state_update(state.tr_ma_state, tr, state.mamode)
 
     state.high_buf.append(high)
     state.low_buf.append(low)
@@ -535,8 +613,12 @@ def _cksp_update(
 
 def _cksp_output_names(params: Dict[str, Any]) -> List[str]:
     p = _as_int(_param(params, "p", 10), 10)
-    x = _as_float(_param(params, "x", 1), 1.0)
-    q = _as_int(_param(params, "q", 9), 9)
+    tvmode_param = params.get("tvmode", None)
+    x_param = params.get("x", None)
+    q_param = params.get("q", None)
+    x = float(x_param) if isinstance(x_param, float) and x_param > 0 else (1.0 if tvmode_param is True else 3.0)
+    q = int(q_param) if isinstance(q_param, float) and q_param > 0 else (9 if tvmode_param is True else 20)
+    x = _fmt_num(x)
     props = f"_{p}_{x}_{q}"
     return [f"CKSPl{props}", f"CKSPs{props}"]
 
@@ -999,6 +1081,8 @@ class PsarState:
     falling: bool
     prev_high: Optional[float] = None
     prev_low: Optional[float] = None
+    prev_close: Optional[float] = None
+    initialized: bool = False
 
 
 def _psar_init(params: Dict[str, Any]) -> PsarState:
@@ -1021,13 +1105,24 @@ def _psar_update(
 ) -> Tuple[List[Optional[float]], PsarState]:
     high, low, close = bar["high"], bar["low"], bar["close"]
 
-    # First bar initialization
-    if state.sar == 0.0:
-        state.sar = close
-        state.ep = low if state.falling else high
+    # First bar initialization: store prevs, return NaN for long/short
+    if state.prev_high is None or state.prev_low is None:
         state.prev_high = high
         state.prev_low = low
-        return [None, None], state
+        state.prev_close = close
+        state.sar = close
+        return [None, None, state.af0, 0], state
+
+    # Second bar: determine initial trend (matches vectorized _falling)
+    if not state.initialized:
+        up = high - state.prev_high
+        dn = state.prev_low - low
+        state.falling = (dn > up and dn > 0)
+        state.ep = state.prev_low if state.falling else state.prev_high
+        if state.sar == 0.0 and state.prev_close is not None:
+            state.sar = state.prev_close
+        state.af = state.af0
+        state.initialized = True
 
     # Calculate new SAR
     new_sar = state.sar + state.af * (state.ep - state.sar)
@@ -1036,8 +1131,7 @@ def _psar_update(
 
     if state.falling:
         # Adjust SAR to not exceed previous highs
-        if state.prev_high is not None:
-            new_sar = min(new_sar, state.prev_high)
+        new_sar = min(new_sar, state.prev_high)
 
         # Check for reversal
         if high > new_sar:
@@ -1053,8 +1147,7 @@ def _psar_update(
                 state.af = min(state.af + state.af0, state.max_af)
     else:
         # Adjust SAR to not go below previous lows
-        if state.prev_low is not None:
-            new_sar = max(new_sar, state.prev_low)
+        new_sar = max(new_sar, state.prev_low)
 
         # Check for reversal
         if low < new_sar:
@@ -1072,12 +1165,13 @@ def _psar_update(
     state.sar = new_sar
     state.prev_high = high
     state.prev_low = low
+    state.prev_close = close
 
     # Return long/short values
     long_val = state.sar if not state.falling else None
     short_val = state.sar if state.falling else None
 
-    return [long_val, short_val], state
+    return [long_val, short_val, state.af, int(reverse)], state
 
 
 def _psar_output_names(params: Dict[str, Any]) -> List[str]:
@@ -1085,7 +1179,7 @@ def _psar_output_names(params: Dict[str, Any]) -> List[str]:
     af0 = _as_float(_param(params, "af0", af), af)
     max_af = _as_float(_param(params, "max_af", 0.2), 0.2)
     props = f"_{af0}_{max_af}"
-    return [f"PSARl{props}", f"PSARs{props}"]
+    return [f"PSARl{props}", f"PSARs{props}", f"PSARaf{props}", f"PSARr{props}"]
 
 
 # replay_only: no SEED_REGISTRY entry
@@ -1138,9 +1232,10 @@ def _zigzag_update(
 ) -> Tuple[List[Optional[float]], ZigzagState]:
     """ZigZag update - simplified live mode.
 
-    Returns [swing, value] where:
+    Returns [swing, value, dev] where:
     - swing: 1 for high pivot, -1 for low pivot, None otherwise
     - value: price at pivot, None otherwise
+    - dev:   deviation from last pivot, None otherwise (not computed here)
     """
     high, low = bar["high"], bar["low"]
 
@@ -1150,7 +1245,7 @@ def _zigzag_update(
 
     # Need full window for pivot detection
     if len(state.high_buf) < state.legs:
-        return [None, None], state
+        return [None, None, None], state
 
     # Check if current midpoint is a pivot
     # For simplicity in stateful mode, we detect pivots at center of window
@@ -1176,18 +1271,18 @@ def _zigzag_update(
 
     # Process latest pivot if any
     if not state.pivot_history:
-        return [None, None], state
+        return [None, None, None], state
 
     # For live mode, return None (zigzag requires full history analysis)
     # Full implementation would need backtest mode logic
-    return [None, None], state
+    return [None, None, None], state
 
 
 def _zigzag_output_names(params: Dict[str, Any]) -> List[str]:
     deviation = _as_float(_param(params, "deviation", 5), 5.0)
     legs = _as_int(_param(params, "legs", 10), 10)
     props = f"_{deviation}%_{legs}"
-    return [f"ZIGZAGs{props}", f"ZIGZAGv{props}"]
+    return [f"ZIGZAGs{props}", f"ZIGZAGv{props}", f"ZIGZAGd{props}"]
 
 
 # replay_only: no SEED_REGISTRY entry

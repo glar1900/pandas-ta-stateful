@@ -67,6 +67,12 @@ def _stdev_from_buf(buf: deque) -> float:
     return math.sqrt(variance)
 
 
+def _fmt_num(val: Any) -> Any:
+    if isinstance(val, float) and float(val).is_integer():
+        return int(val)
+    return val
+
+
 # ===========================================================================
 # ATR
 # ===========================================================================
@@ -293,8 +299,8 @@ def _thermo_update(
 
 def _thermo_output_names(params: Dict[str, Any]) -> List[str]:
     length = _as_int(_param(params, "length", 20), 20)
-    long   = _as_float(_param(params, "long", 2), 2.0)
-    short  = _as_float(_param(params, "short", 0.5), 0.5)
+    long   = _fmt_num(_as_float(_param(params, "long", 2), 2.0))
+    short  = _fmt_num(_as_float(_param(params, "short", 0.5), 0.5))
     _props = f"_{length}_{long}_{short}"
     return [f"THERMO{_props}", f"THERMOma{_props}",
             f"THERMOl{_props}", f"THERMOs{_props}"]
@@ -664,7 +670,7 @@ def _kc_update(
 
 def _kc_output_names(params: Dict[str, Any]) -> List[str]:
     length = _as_int(_param(params, "length", 20), 20)
-    scalar = _as_float(_param(params, "scalar", 2), 2.0)
+    scalar = _fmt_num(_as_float(_param(params, "scalar", 2), 2.0))
     mamode = str(_param(params, "mamode", "ema"))
     _m = mamode.lower()[0] if mamode else ""
     _props = f"{_m}_{length}_{scalar}"
@@ -968,7 +974,7 @@ def _hwc_update(
 
 
 def _hwc_output_names(params: Dict[str, Any]) -> List[str]:
-    scalar   = _as_float(_param(params, "scalar", 1), 1.0)
+    scalar   = _fmt_num(_as_float(_param(params, "scalar", 1), 1.0))
     channels = bool(_param(params, "channels", True))
     _props = f"_{scalar}"
     names = [f"HWM{_props}", f"HWL{_props}", f"HWU{_props}"]
