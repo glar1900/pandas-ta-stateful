@@ -191,7 +191,11 @@ def replay_seed(kind: str, inputs: Dict[str, Any], params: Dict[str, Any]) -> An
             if pd.isna(v):
                 valid = False
                 break
-            bar[k] = float(v)
+            # Handle Timestamp objects by converting to epoch seconds
+            if isinstance(v, pd.Timestamp):
+                bar[k] = v.value / 1e9  # Convert nanoseconds to seconds
+            else:
+                bar[k] = float(v)
         if not valid:
             continue
         _, state = indicator.update(state, bar, params)
