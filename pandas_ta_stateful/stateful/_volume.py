@@ -9,6 +9,7 @@ internal_series: adosc, aobv, kvo, pvo, vwap
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import datetime as _dt
 from typing import Any, Dict, List, Optional, Tuple
 from collections import deque
 
@@ -948,7 +949,32 @@ def _vwap_session_key(timestamp: float, anchor: str) -> Any:
     Fallback: integer-truncate timestamp to day.
     """
     anchor_up = anchor.upper() if anchor else "D"
-    ts = float(timestamp)
+
+    # Coerce timestamp to epoch seconds
+    ts = timestamp
+    try:
+        # numpy datetime64
+        import numpy as _np
+        if isinstance(ts, _np.datetime64):
+            ts = ts.astype("datetime64[ns]").astype("int64") / 1e9
+    except Exception:
+        pass
+    try:
+        import pandas as _pd
+        if isinstance(ts, _pd.Timestamp):
+            ts = ts.value / 1e9
+    except Exception:
+        pass
+    if isinstance(ts, _dt.datetime):
+        ts = ts.timestamp()
+    elif isinstance(ts, _dt.date):
+        ts = _dt.datetime(ts.year, ts.month, ts.day).timestamp()
+    else:
+        try:
+            ts = float(ts)
+        except Exception:
+            # If we cannot coerce, fall back to a stable key (no session change)
+            return None
 
     if anchor_up.startswith("D"):
         return int(ts // 86400)
@@ -977,6 +1003,9 @@ def _vwap_update(
 
     tp = (high + low + close) / 3.0
     key = _vwap_session_key(timestamp, anchor)
+    if key is None:
+        # Cannot derive a session key; skip update safely
+        return [None], state
 
     # Reset accumulators on session change
     if state.session_key is not None and key != state.session_key:
