@@ -590,8 +590,10 @@ class AnalysisIndicators(object):
         if isinstance(user_excluded, list) and len(user_excluded) > 0:
             removed += user_excluded
 
-        # Remove the unwanted indicators
-        [ta_indicators.remove(x) for x in removed]
+        # Remove the unwanted indicators (only if present)
+        for x in removed:
+            if x in ta_indicators:
+                ta_indicators.remove(x)
 
         if as_list:
             return ta_indicators
