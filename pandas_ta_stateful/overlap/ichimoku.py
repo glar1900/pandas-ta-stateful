@@ -55,7 +55,7 @@ def ichimoku(
         return None, None
 
     offset = v_offset(offset)
-    if not kwargs.get("lookahead", True):
+    if not kwargs.get("lookahead", False):
         include_chikou = False
 
     # Calculate

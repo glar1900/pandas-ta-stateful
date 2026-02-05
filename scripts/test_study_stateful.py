@@ -31,7 +31,7 @@ def make_ohlcv(rows: int, seed: int) -> pd.DataFrame:
     high = np.maximum(open_, close) + rng.random(rows) * 0.5
     low = np.minimum(open_, close) - rng.random(rows) * 0.5
     volume = rng.integers(100, 1000, rows)
-    return pd.DataFrame(
+    df = pd.DataFrame(
         {
             "open": open_,
             "high": high,
@@ -41,6 +41,9 @@ def make_ohlcv(rows: int, seed: int) -> pd.DataFrame:
         },
         index=idx,
     )
+    # Some indicators expect a numeric 'timestamp' column. Provide seconds.
+    df["timestamp"] = df.index.view("int64") // 1_000_000_000
+    return df
 
 
 def parse_exclude(value: str | None) -> List[str]:
@@ -81,8 +84,6 @@ def main() -> None:
 
     exclude = DEFAULT_EXCLUDE + parse_exclude(args.exclude)
 
-    print(1)
-
     # Vectorized study reference
     df_study = df_full.copy()
     df_study.ta.study(
@@ -93,8 +94,6 @@ def main() -> None:
         cores=0,
         exclude=exclude,
     )
-
-    print(2)
 
     # Stateful seed (t=0..split)
     df_seed = df_full.iloc[: args.split + 1].copy()
@@ -109,8 +108,6 @@ def main() -> None:
         exclude=exclude,
         state=None,
     )
-
-    print(3)
 
     # Incremental update (t=split+1..end)
     df_inc = df_full.copy()
@@ -128,17 +125,27 @@ def main() -> None:
         state_timestamp=split_ts,
     )
 
-    print(4)
-
     # Combine seed + incremental
     indicator_cols = [c for c in df_study.columns if c not in base_cols]
+    seed_cols = [c for c in indicator_cols if c in res_seed.columns]
+    inc_cols = [c for c in indicator_cols if c in res_inc.columns]
+    common_cols = sorted(set(seed_cols) & set(inc_cols))
+    missing_seed = sorted(set(indicator_cols) - set(seed_cols))
+    missing_inc = sorted(set(indicator_cols) - set(inc_cols))
+
+    if missing_seed:
+        print(f"[i] missing in seed (ignored): {len(missing_seed)}")
+    if missing_inc:
+        print(f"[i] missing in incremental (ignored): {len(missing_inc)}")
+
     combined = res_inc.copy()
-    combined.loc[:split_ts, indicator_cols] = res_seed.loc[:split_ts, indicator_cols]
+    combined.loc[:split_ts, common_cols] = res_seed.loc[:split_ts, common_cols]
 
     # Compare last N rows
     compare_idx = df_full.index[-args.tail :]
-    ref = df_study.loc[compare_idx, indicator_cols]
-    test = combined.loc[compare_idx, indicator_cols]
+    compare_cols = [c for c in indicator_cols if c in combined.columns]
+    ref = df_study.loc[compare_idx, compare_cols]
+    test = combined.loc[compare_idx, compare_cols]
 
     summary = compare_frames(ref, test, args.eps)
 
