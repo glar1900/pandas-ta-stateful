@@ -57,6 +57,30 @@ def _fmt_num(val: Any) -> Any:
     return val
 
 
+def _last_valid(series: Any) -> Optional[float]:
+    if series is None:
+        return None
+    try:
+        lv = series.dropna()
+    except Exception:
+        return None
+    if len(lv) == 0:
+        return None
+    return float(lv.iloc[-1])
+
+
+def _tail_values(series: Any, count: int) -> List[float]:
+    if series is None or count <= 0:
+        return []
+    try:
+        lv = series.dropna()
+    except Exception:
+        return []
+    if len(lv) == 0:
+        return []
+    return [float(v) for v in lv.iloc[-count:].values]
+
+
 # ===========================================================================
 # OBV – On Balance Volume
 # ===========================================================================
@@ -99,8 +123,16 @@ def _obv_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _obv_seed(inputs: Dict[str, Any], params: Dict[str, Any]) -> OBVState:
-    """output_only seed: replay then extract final state."""
-    return replay_seed("obv", inputs, params)
+    """Seed from vectorized OBV when available; fallback to replay."""
+    state = _obv_init(params)
+    last_obv = _last_valid(inputs.get("OBV"))
+    if last_obv is None:
+        return replay_seed("obv", inputs, params)
+    state.cumsum_value = last_obv
+    last_close = _last_valid(inputs.get("close"))
+    if last_close is not None:
+        state.prev_close = last_close
+    return state
 
 
 STATEFUL_REGISTRY["obv"] = StatefulIndicator(
@@ -207,7 +239,16 @@ def _pvt_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _pvt_seed(inputs: Dict[str, Any], params: Dict[str, Any]) -> PVTState:
-    return replay_seed("pvt", inputs, params)
+    state = _pvt_init(params)
+    last_pvt = _last_valid(inputs.get("PVT"))
+    if last_pvt is None:
+        return replay_seed("pvt", inputs, params)
+    state.cumsum_value = last_pvt
+    close_s = inputs.get("close")
+    if close_s is not None:
+        tail = _tail_values(close_s, state.drift + 1)
+        state.close_buf = deque(tail, maxlen=state.drift + 1)
+    return state
 
 
 STATEFUL_REGISTRY["pvt"] = StatefulIndicator(
@@ -371,7 +412,29 @@ def _pvi_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _pvi_seed(inputs: Dict[str, Any], params: Dict[str, Any]) -> PVIState:
-    return replay_seed("pvi", inputs, params)
+    state = _pvi_init(params)
+    names = _pvi_output_names(params)
+    pvi_s = inputs.get(names[0])
+    last_pvi = _last_valid(pvi_s)
+    if last_pvi is None:
+        return replay_seed("pvi", inputs, params)
+    state.pvi_value = last_pvi
+    state.prev_close = _last_valid(inputs.get("close"))
+    state.prev_volume = _last_valid(inputs.get("volume"))
+    state._first_bar = False
+
+    mamode = state.mamode.lower()
+    if mamode == "sma":
+        buf = deque(maxlen=state.length)
+        for v in _tail_values(pvi_s, state.length):
+            buf.append(v)
+        state.ma_state = buf
+    else:
+        ma_s = inputs.get(names[1])
+        ma_last = _last_valid(ma_s)
+        if ma_last is not None and hasattr(state.ma_state, "last"):
+            state.ma_state.last = ma_last
+    return state
 
 
 STATEFUL_REGISTRY["pvi"] = StatefulIndicator(
@@ -620,7 +683,50 @@ def _aobv_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _aobv_seed(inputs: Dict[str, Any], params: Dict[str, Any]) -> AOBVState:
-    return replay_seed("aobv", inputs, params)
+    # Prefer vectorized outputs to avoid OBV offset drift; fallback to replay.
+    state = _aobv_init(params)
+    names = _aobv_output_names(params)
+    obv_s = inputs.get(names[0])
+    last_obv = _last_valid(obv_s)
+    if last_obv is None:
+        return replay_seed("aobv", inputs, params)
+    state.obv_cumsum = last_obv
+    state.prev_close = _last_valid(inputs.get("close"))
+
+    # Recompute params to align fast/slow with output names
+    fast = _as_int(_param(params, "fast", 4), 4)
+    slow = _as_int(_param(params, "slow", 12), 12)
+    min_lb = _as_int(_param(params, "min_lookback", 2), 2)
+    max_lb = _as_int(_param(params, "max_lookback", 2), 2)
+    run_length = _as_int(_param(params, "run_length", 2), 2)
+    mamode = str(_param(params, "mamode", "ema")).lower()
+    if slow < fast:
+        fast, slow = slow, fast
+
+    # Rolling min/max buffers on OBV
+    state.rolling_min_buf = deque(_tail_values(obv_s, min_lb), maxlen=min_lb)
+    state.rolling_max_buf = deque(_tail_values(obv_s, max_lb), maxlen=max_lb)
+
+    # MA state
+    if mamode == "sma":
+        state.fast_ma = deque(_tail_values(obv_s, fast), maxlen=fast)
+        state.slow_ma = deque(_tail_values(obv_s, slow), maxlen=slow)
+    else:
+        fast_s = inputs.get(names[3])
+        slow_s = inputs.get(names[4])
+        fast_last = _last_valid(fast_s)
+        slow_last = _last_valid(slow_s)
+        if fast_last is not None and hasattr(state.fast_ma, "last"):
+            state.fast_ma.last = fast_last
+        if slow_last is not None and hasattr(state.slow_ma, "last"):
+            state.slow_ma.last = slow_last
+
+    # Run-length histories (use MA outputs when available)
+    fast_hist_s = inputs.get(names[3])
+    slow_hist_s = inputs.get(names[4])
+    state.fast_hist = deque(_tail_values(fast_hist_s, run_length + 1), maxlen=run_length + 1)
+    state.slow_hist = deque(_tail_values(slow_hist_s, run_length + 1), maxlen=run_length + 1)
+    return state
 
 
 STATEFUL_REGISTRY["aobv"] = StatefulIndicator(

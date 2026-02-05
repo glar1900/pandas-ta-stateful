@@ -1616,22 +1616,8 @@ def _jma_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _jma_seed(series: Dict[str, Any], params: Dict[str, Any]) -> JMAState:
-    """internal_series: JMA has too many coupled state variables for
-    simple extraction.  Seed via replay_seed for exact parity.
-    We attempt to at least set prev_jma from the output series.
-    """
-    state = _jma_init(params)
-    col   = _jma_output_names(params)[0]
-    s     = series.get(col)
-    if s is not None:
-        lv = s.dropna()
-        if len(lv) > 0:
-            state.prev_jma = float(lv.iloc[-1])
-            state.ma1      = state.prev_jma
-            state.uBand    = state.prev_jma
-            state.lBand    = state.prev_jma
-            state._count   = len(s)
-    return state
+    """internal_series: replay for exact parity."""
+    return replay_seed("jma", series, params)
 
 
 STATEFUL_REGISTRY["jma"] = StatefulIndicator(
@@ -1929,28 +1915,8 @@ def _mama_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _mama_seed(series: Dict[str, Any], params: Dict[str, Any]) -> MAMAState:
-    """internal_series: MAMA has deeply coupled Hilbert state.
-    We seed mama_prev / fama_prev from output; for full parity use replay_seed().
-    """
-    state = _mama_init(params)
-    names = _mama_output_names(params)
-    s_mama = series.get(names[0])
-    s_fama = series.get(names[1])
-    if s_mama is not None:
-        lv = s_mama.dropna()
-        if len(lv) > 0:
-            state.mama_prev = float(lv.iloc[-1])
-            state._count    = len(s_mama)
-    if s_fama is not None:
-        lv = s_fama.dropna()
-        if len(lv) > 0:
-            state.fama_prev = float(lv.iloc[-1])
-    # Populate x_buf from close tail if available
-    close_s = series.get("close")
-    if close_s is not None and len(close_s) >= 7:
-        tail = close_s.iloc[-7:]
-        state.x_buf = deque((float(v) for v in tail.values), maxlen=7)
-    return state
+    """internal_series: replay for exact parity."""
+    return replay_seed("mama", series, params)
 
 
 STATEFUL_REGISTRY["mama"] = StatefulIndicator(
