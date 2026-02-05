@@ -4,18 +4,18 @@ from setuptools import setup, find_packages
 long_description = "An easy to use Python 3 Pandas Extension of Technical Analysis Indicators"
 
 setup(
-    name = "pandas_ta",
+    name = "pandas_ta_stateful",
     packages = find_packages(),  # ✅ 모든 서브패키지 포함!
     version = "0.1.7a",
     description=long_description,
     long_description=long_description,
     author = "Kevin Johnson",
     author_email = "appliedmathkj@gmail.com",
-    url = "https://github.com/twopirllc/pandas-ta",
-    maintainer="Kevin Johnson",
-    maintainer_email="appliedmathkj@gmail.com",
+    url = "https://github.com/glar1900/pandas-ta-stateful",
+    maintainer="Han Sang Woo",
+    maintainer_email="hsangwoo5@naver.com",
     # install_requires=['numpy','pandas'],
-    download_url = "https://github.com/twopirllc/pandas-ta.git",
+    download_url = "https://github.com/glar1900/pandas-ta-stateful.git",
     keywords = ['technical analysis', 'python3', 'pandas'],
     license="The MIT License (MIT)",
     classifiers = [

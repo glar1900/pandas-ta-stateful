@@ -1,0 +1,111 @@
+================================================================================
+📊 OVERALL CLASSIFICATION STATISTICS
+================================================================================
+
+Total Indicators: 157
+
+Memory Type Distribution:
+------------------------------------------------------------
+  window       :  75 ( 47.8%)
+  stateful     :  78 ( 49.7%)
+  lookahead    :   4 (  2.5%)
+
+Stateful Breakdown by Seed Method:
+------------------------------------------------------------
+  output_only      :  31 ( 39.7% of stateful)
+  internal_series  :  39 ( 50.0% of stateful)
+  replay_only      :   8 ( 10.3% of stateful)
+
+================================================================================
+📁 CATEGORY BREAKDOWN
+================================================================================
+
+Category         Total  Window  Stateful  Lookahead  Unknown
+--------------------------------------------------------------------------------
+candle               5       4         1          0        0
+cycle                2       0         2          0        0
+momentum            44      22        22          0        0
+overlap             36      16        19          1        0
+performance          3       2         1          0        0
+statistics          10       9         0          1        0
+trend               21       9        11          1        0
+volatility          16       5        11          0        0
+volume              20       8        11          1        0
+--------------------------------------------------------------------------------
+TOTAL              157      75        78          4        0
+
+================================================================================
+🌊 STREAMING COMPATIBILITY ANALYSIS
+================================================================================
+
+✅ Streaming Compatible: 153 (97.5%)
+   - Window-based:       75 (no state needed)
+   - Stateful:          78 (state tracking required)
+
+   Stateful Seeding Difficulty:
+     • Easy (output_only):      31 - Last output value(s) sufficient
+     • Medium (internal_series): 39 - Intermediate series needed
+     • Hard (replay_only):        8 - Must replay to extract state
+
+❌ NOT Streaming Compatible: 4 (2.5%)
+   - Lookahead:         4 (requires future data)
+
+   ⚠️  Conditional lookahead: 2 (can be made non-lookahead with options)
+       dpo, ichimoku
+
+   ⚠️  Approximate streaming: 2 (allow expanding approximation with warning)
+       tos_stdevall, vp
+
+   ✅ Effective hard lookahead after config/approx: 0
+
+================================================================================
+📋 INDICATORS BY CLASSIFICATION
+================================================================================
+
+🟦 WINDOW Indicators ( 75 )
+--------------------------------------------------------------------------------
+candle       ( 4): cdl_doji, cdl_inside, cdl_pattern, cdl_z
+momentum     (22): ao, bop, brar, cci, cfo, cg, coppock, cti, er, kst, mom, psl, roc, rvgi, slope, smc, squeeze, squeeze_pro, stoch, stochf, uo, willr
+overlap      (16): alma, fwma, hl2, hlc3, hma, linreg, midpoint, midprice, ohlc4, pwma, sinwma, sma, swma, trima, wcp, wma
+performance  ( 2): log_return, percent_return
+statistics   ( 9): entropy, kurtosis, mad, median, quantile, skew, stdev, variance, zscore
+trend        ( 9): aroon, chop, decreasing, increasing, long_run, short_run, ttm_trend, vhf, vortex
+volatility   ( 5): bbands, donchian, pdist, true_range, ui
+volume       ( 8): cmf, eom, mfi, pvol, pvr, tsv, vhm, vwma
+
+🟩 STATEFUL Indicators ( 78 )
+--------------------------------------------------------------------------------
+
+  [output_only] (31)
+    candle       ( 1): ha
+    momentum     (10): apo, bias, dm, eri, exhc, kdj, macd, ppo, tmo, tsi
+    overlap      (10): alligator, ema, hilo, kama, mcgd, rma, smma, t3, tema, zlma
+    performance  ( 1): drawdown
+    trend        ( 1): decay
+    volatility   ( 2): accbands, thermo
+    volume       ( 6): ad, efi, nvi, obv, pvi, pvt
+
+  [internal_series] (39)
+    cycle        ( 2): ebsw, reflex
+    momentum     ( 8): cmo, crsi, inertia, pgo, rsi, smi, stochrsi, trix
+    overlap      ( 8): dema, jma, mama, pivots, ssf, ssf3, supertrend, vidya
+    trend        ( 8): adx, alphatrend, amat, cksp, ht_trendline, qstick, rwi, trendflex
+    volatility   ( 8): aberration, atr, atrts, chandelier_exit, kc, massi, natr, rvi
+    volume       ( 5): adosc, aobv, kvo, pvo, vwap
+
+  [replay_only] ( 8)
+    momentum     ( 4): fisher, qqe, rsx, stc
+    overlap      ( 1): hwma
+    trend        ( 2): psar, zigzag
+    volatility   ( 1): hwc
+
+🟥 LOOKAHEAD Indicators ( 4 )
+--------------------------------------------------------------------------------
+overlap      ( 1): ichimoku
+statistics   ( 1): tos_stdevall
+trend        ( 1): dpo
+volume       ( 1): vp
+
+================================================================================
+✅ Analysis Complete!
+================================================================================

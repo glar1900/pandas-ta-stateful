@@ -1,1 +1,1 @@
-Fork for https://github.com/aarigs/pandas-ta
+Fork of https://github.com/aarigs/pandas-ta
