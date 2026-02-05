@@ -26,6 +26,7 @@ import pandas_ta_stateful as ta
 
 
 DEFAULT_EXCLUDE = ["long_run", "short_run", "tsignals", "xsignals"]
+DEFAULT_DROP_PREFIXES = ("TOS_",)
 
 
 def make_ohlcv(rows: int, seed: int) -> pd.DataFrame:
@@ -59,6 +60,13 @@ def parse_exclude(value: str | None) -> List[str]:
 
 
 def compare_frames(ref: pd.DataFrame, test: pd.DataFrame, eps: float) -> pd.DataFrame:
+    # Ensure numeric comparison (coerce None/objects to NaN)
+    ref = ref.copy()
+    test = test.copy()
+    for col in ref.columns:
+        ref[col] = pd.to_numeric(ref[col], errors="coerce")
+    for col in test.columns:
+        test[col] = pd.to_numeric(test[col], errors="coerce")
     diff = (test - ref).abs()
     rel = diff / (ref.abs() + eps)
     return pd.DataFrame(
@@ -103,6 +111,20 @@ def main() -> None:
         exclude=exclude,
     )
 
+    # Full stateful run (no seeding, compute stateful across all rows)
+    df_full_stateful = df_full.copy()
+    res_full_stateful, _ = df_full_stateful.ta.study_stateful(
+        append=True,
+        returns=True,
+        returns_state=True,
+        verbose=False,
+        timed=False,
+        ordered=True,
+        cores=0,
+        exclude=exclude,
+        state={},
+    )
+
     # Stateful seed (t=0..split)
     df_seed = df_full.iloc[: args.split + 1].copy()
     res_seed, state = df_seed.ta.study_stateful(
@@ -135,6 +157,8 @@ def main() -> None:
 
     # Combine seed + incremental
     indicator_cols = [c for c in df_study.columns if c not in base_cols]
+    # Drop noisy approximate outputs (e.g., TOS_*)
+    indicator_cols = [c for c in indicator_cols if not c.startswith(DEFAULT_DROP_PREFIXES)]
     seed_cols = [c for c in indicator_cols if c in res_seed.columns]
     inc_cols = [c for c in indicator_cols if c in res_inc.columns]
     common_cols = sorted(set(seed_cols) & set(inc_cols))
@@ -178,6 +202,15 @@ def main() -> None:
     inc_test = res_inc.loc[inc_idx, inc_cols]
     inc_summary = compare_frames(inc_ref, inc_test, args.eps)
 
+    # Compare stateful full-run vs incremental (incremental segment only)
+    full_inc_cols = [
+        c for c in indicator_cols
+        if c in res_full_stateful.columns and c in res_inc.columns
+    ]
+    full_inc_ref = res_full_stateful.loc[inc_idx, full_inc_cols]
+    full_inc_test = res_inc.loc[inc_idx, full_inc_cols]
+    full_inc_summary = compare_frames(full_inc_ref, full_inc_test, args.eps)
+
     # Output
     print("[i] rows:", args.rows)
     print("[i] split index:", args.split)
@@ -197,6 +230,11 @@ def main() -> None:
     print(inc_summary.sort_values("max_abs", ascending=False).head(15))
     print("\nTop 15 by mean_abs (incremental segment):")
     print(inc_summary.sort_values("mean_abs", ascending=False).head(15))
+
+    print("\nTop 15 by max_abs (stateful full-run vs incremental, inc segment):")
+    print(full_inc_summary.sort_values("max_abs", ascending=False).head(15))
+    print("\nTop 15 by mean_abs (stateful full-run vs incremental, inc segment):")
+    print(full_inc_summary.sort_values("mean_abs", ascending=False).head(15))
 
 
 if __name__ == "__main__":

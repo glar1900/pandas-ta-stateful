@@ -1448,26 +1448,8 @@ def _vidya_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _vidya_seed(series: Dict[str, Any], params: Dict[str, Any]) -> VIDYAState:
-    """internal_series seed: recover prev_vidya + momentum buffer from close."""
-    length = _as_int(_param(params, "length", 14), 14)
-    state  = _vidya_init(params)
-    col    = _vidya_output_names(params)[0]
-    s      = series.get(col)
-    if s is not None:
-        lv = s.dropna()
-        if len(lv) > 0:
-            state.prev_vidya = float(lv.iloc[-1])
-
-    # Recover momentum buffer from close series
-    close_s = series.get("close")
-    if close_s is not None and len(close_s) >= length + 1:
-        tail = close_s.iloc[-(length + 1):]
-        state.prev_close = float(tail.iloc[-1])
-        state.mom_buf = deque(maxlen=length)
-        for i in range(1, len(tail)):
-            state.mom_buf.append(float(tail.iloc[i]) - float(tail.iloc[i - 1]))
-        state._count = len(close_s)
-    return state
+    """internal_series: replay for exact parity."""
+    return replay_seed("vidya", series, params)
 
 
 STATEFUL_REGISTRY["vidya"] = StatefulIndicator(
