@@ -858,6 +858,7 @@ class AnalysisIndicators(object):
             state = {}
 
         stateful_only = kwargs.pop("stateful_only", False)
+        progress = kwargs.pop("progress", False)
         verbose = kwargs.pop("verbose", False)
         timed = kwargs.pop("timed", False)
         state_timestamp = kwargs.pop("state_timestamp", None)
@@ -1108,7 +1109,10 @@ class AnalysisIndicators(object):
             return result_out
         stateful_df = DataFrame(index=self._df.index)
         if len(work) > 0:
-            for i in range(start_idx, rows):
+            row_iter = range(start_idx, rows)
+            if progress:
+                row_iter = tqdm(row_iter, desc="[i] stateful rows")
+            for i in row_iter:
                 for item in work:
                     inputs = {inp: item["input_arrays"][inp][i] for inp in item["inputs"]}
                     values, new_state = item["indicator"].update(
