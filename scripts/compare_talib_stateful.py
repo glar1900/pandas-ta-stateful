@@ -139,8 +139,10 @@ def main() -> None:
 
     if missing_seed:
         print(f"[i] missing in seed (ignored): {len(missing_seed)}")
+        print("[i] missing in seed:", ", ".join(missing_seed))
     if missing_inc:
         print(f"[i] missing in incremental (ignored): {len(missing_inc)}")
+        print("[i] missing in incremental:", ", ".join(missing_inc))
 
     combined = res_inc.reindex(df_full.index)
     combined.loc[:split_ts, common_cols] = res_seed.loc[:split_ts, common_cols]

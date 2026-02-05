@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from collections import deque
 import math
+import numpy as np
 
 from ._base import (
     NAN, _is_nan, _param, _as_int, _as_float,
@@ -20,6 +21,7 @@ from ._base import (
     STATEFUL_REGISTRY, SEED_REGISTRY,
     replay_seed,
 )
+from pandas_ta_stateful.maps import Imports
 
 # ---------------------------------------------------------------------------
 # Internal helpers (from _volatility.py pattern)
@@ -142,6 +144,7 @@ class ADXState:
     signal_length: int
     scalar: float
     mamode: str
+    use_talib: bool
     atr_state: ATRState
     pos_ma_state: Any       # EMAState or deque
     neg_ma_state: Any
@@ -155,12 +158,16 @@ def _adx_init(params: Dict[str, Any]) -> ADXState:
     signal_length = _as_int(_param(params, "signal_length", length), length)
     scalar = _as_float(_param(params, "scalar", 100), 100.0)
     mamode = str(_param(params, "mamode", "rma"))
+    use_talib = bool(_param(params, "talib", True)) and Imports.get("talib", False)
+    if use_talib:
+        mamode = "rma"
 
     return ADXState(
         length=length,
         signal_length=signal_length,
         scalar=scalar,
         mamode=mamode,
+        use_talib=use_talib,
         atr_state=ATRState(length=length, percent=False),
         pos_ma_state=_ma_state_make(mamode, length),
         neg_ma_state=_ma_state_make(mamode, length),
@@ -200,6 +207,11 @@ def _adx_update(
 
     if dmp_val is None or dmn_val is None:
         return [None, None, None], state
+
+    if state.use_talib and state.mamode.lower() == "rma":
+        # TA-Lib PLUS_DM/MINUS_DM uses Wilder-smoothed SUM. Multiply by length.
+        dmp_val = dmp_val * state.length
+        dmn_val = dmn_val * state.length
 
     dmp = k * dmp_val
     dmn = k * dmn_val
@@ -578,16 +590,38 @@ class HtTrendlineState:
     i_trend_buf: deque = field(default_factory=lambda: deque([0.0]*4, maxlen=4))
     close_buf: deque = field(default_factory=lambda: deque([0.0]*4, maxlen=4))
     warmup: int = 0
+    use_talib: bool = False
+    close_hist: list = field(default_factory=list)
 
 
 def _ht_trendline_init(params: Dict[str, Any]) -> HtTrendlineState:
-    return HtTrendlineState()
+    use_talib = bool(_param(params, "talib", True)) and Imports.get("talib", False)
+    return HtTrendlineState(use_talib=use_talib)
 
 
 def _ht_trendline_update(
     state: HtTrendlineState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], HtTrendlineState]:
     x = bar["close"]
+    if _is_nan(x):
+        return [None], state
+
+    if state.use_talib:
+        # Accuracy-first: delegate to TA-Lib using full history buffer.
+        state.close_hist.append(float(x))
+        try:
+            import talib  # type: ignore
+        except Exception:
+            # Fallback to custom incremental if TA-Lib unavailable at runtime.
+            state.use_talib = False
+        else:
+            arr = np.asarray(state.close_hist, dtype=float)
+            out = talib.HT_TRENDLINE(arr)
+            last = out[-1] if len(out) else np.nan
+            if np.isnan(last):
+                return [None], state
+            return [float(last)], state
+
     state.close_buf.append(x)
     state.warmup += 1
 
@@ -687,7 +721,17 @@ def _ht_trendline_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _ht_trendline_seed(series: Dict[str, Any], params: Dict[str, Any]) -> HtTrendlineState:
-    """Reconstruct HtTrendlineState by replaying over the raw input series."""
+    """Reconstruct HtTrendlineState by replaying or priming history."""
+    state = _ht_trendline_init(params)
+    if state.use_talib:
+        close_s = series.get("close")
+        if close_s is not None:
+            import pandas as _pd
+            for v in close_s:
+                if _pd.isna(v):
+                    continue
+                state.close_hist.append(float(v))
+        return state
     return replay_seed("ht_trendline", series, params)
 
 

@@ -39,6 +39,7 @@ from ._base import (
     SEED_REGISTRY,
     replay_seed,
 )
+from pandas_ta_stateful.maps import Imports
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +481,9 @@ SEED_REGISTRY["bias"] = _bias_seed
 
 @dataclass
 class DMState:
+    length: int
+    mamode: str
+    use_talib: bool
     dmp_ma: EMAState
     dmn_ma: EMAState
     prev_high: Optional[float] = None
@@ -489,7 +493,13 @@ class DMState:
 def _dm_init(params: Dict[str, Any]) -> DMState:
     length = _as_int(_param(params, "length", 14), 14)
     mamode = str(_param(params, "mamode", "rma"))
+    use_talib = bool(_param(params, "talib", True)) and Imports.get("talib", False)
+    if use_talib:
+        mamode = "rma"
     return DMState(
+        length=length,
+        mamode=mamode,
+        use_talib=use_talib,
         dmp_ma=_ma_state_for_mode(mamode, length),
         dmn_ma=_ma_state_for_mode(mamode, length),
     )
@@ -522,6 +532,10 @@ def _dm_update(
     n_val, state.dmn_ma = ema_update_raw(state.dmn_ma, dmn)
 
     if p_val is not None and n_val is not None:
+        if state.use_talib and state.mamode.lower() == "rma":
+            # TA-Lib PLUS_DM/MINUS_DM returns Wilder-smoothed SUM (not avg).
+            p_val = p_val * state.length
+            n_val = n_val * state.length
         return [p_val, n_val], state
     return [None, None], state
 
