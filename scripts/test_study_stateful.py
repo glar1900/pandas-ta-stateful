@@ -12,7 +12,13 @@ study_stateful's built-in exclusions.
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from typing import List
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 import numpy as np
 import pandas as pd
@@ -70,7 +76,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rows", type=int, default=1011)
     ap.add_argument("--split", type=int, default=1005, help="seed end index")
-    ap.add_argument("--tail", type=int, default=10, help="compare last N rows")
+    ap.add_argument("--tail", type=int, default=10, help="compare last N rows (combined)")
+    ap.add_argument("--seed-tail", type=int, default=5, help="compare last N rows of seed segment")
+    ap.add_argument("--inc-tail", type=int, default=5, help="compare first N rows of incremental segment")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--exclude", type=str, default="", help="comma-separated kinds to exclude")
     ap.add_argument("--eps", type=float, default=1e-12)
@@ -143,26 +151,52 @@ def main() -> None:
     combined = res_inc.reindex(df_full.index)
     combined.loc[:split_ts, common_cols] = res_seed.loc[:split_ts, common_cols]
 
-    # Compare last N rows
-    compare_idx = df_full.index[-args.tail :]
+    # Compare combined last N rows
     compare_cols = [c for c in indicator_cols if c in combined.columns]
-    ref = df_study.loc[:, compare_cols]
-    test = combined.loc[:, compare_cols]
-    compare_idx = compare_idx.intersection(ref.index).intersection(test.index)
-    ref = ref.loc[compare_idx]
-    test = test.loc[compare_idx]
-
+    ref_all = df_study.loc[:, compare_cols]
+    test_all = combined.loc[:, compare_cols]
+    compare_idx = df_full.index[-args.tail :]
+    compare_idx = compare_idx.intersection(ref_all.index).intersection(test_all.index)
+    ref = ref_all.loc[compare_idx]
+    test = test_all.loc[compare_idx]
     summary = compare_frames(ref, test, args.eps)
+
+    # Compare seed segment (t=split-seed_tail+1 .. split)
+    seed_start = max(0, args.split - args.seed_tail + 1)
+    seed_idx = df_full.index[seed_start: args.split + 1]
+    seed_cols = [c for c in indicator_cols if c in res_seed.columns]
+    seed_ref = df_study.loc[seed_idx, seed_cols]
+    seed_test = res_seed.loc[seed_idx, seed_cols]
+    seed_summary = compare_frames(seed_ref, seed_test, args.eps)
+
+    # Compare incremental segment (t=split+1 .. split+inc_tail)
+    inc_start = args.split + 1
+    inc_end = min(args.rows, inc_start + args.inc_tail)
+    inc_idx = df_full.index[inc_start:inc_end]
+    inc_cols = [c for c in indicator_cols if c in res_inc.columns]
+    inc_ref = df_study.loc[inc_idx, inc_cols]
+    inc_test = res_inc.loc[inc_idx, inc_cols]
+    inc_summary = compare_frames(inc_ref, inc_test, args.eps)
 
     # Output
     print("[i] rows:", args.rows)
     print("[i] split index:", args.split)
     print("[i] compare rows:", len(compare_idx))
     print("[i] indicator columns:", len(indicator_cols))
-    print("\nTop 15 by max_abs:")
+    print("\nTop 15 by max_abs (combined):")
     print(summary.sort_values("max_abs", ascending=False).head(15))
-    print("\nTop 15 by mean_abs:")
+    print("\nTop 15 by mean_abs (combined):")
     print(summary.sort_values("mean_abs", ascending=False).head(15))
+
+    print("\nTop 15 by max_abs (seed segment):")
+    print(seed_summary.sort_values("max_abs", ascending=False).head(15))
+    print("\nTop 15 by mean_abs (seed segment):")
+    print(seed_summary.sort_values("mean_abs", ascending=False).head(15))
+
+    print("\nTop 15 by max_abs (incremental segment):")
+    print(inc_summary.sort_values("max_abs", ascending=False).head(15))
+    print("\nTop 15 by mean_abs (incremental segment):")
+    print(inc_summary.sort_values("mean_abs", ascending=False).head(15))
 
 
 if __name__ == "__main__":

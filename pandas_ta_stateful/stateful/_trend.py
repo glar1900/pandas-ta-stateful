@@ -1119,50 +1119,35 @@ def _psar_update(
         dn = state.prev_low - low
         state.falling = (dn > up and dn > 0)
         state.ep = state.prev_low if state.falling else state.prev_high
-        if state.sar == 0.0 and state.prev_close is not None:
+        if state.prev_close is not None:
             state.sar = state.prev_close
         state.af = state.af0
         state.initialized = True
 
     # Calculate new SAR
-    new_sar = state.sar + state.af * (state.ep - state.sar)
-
+    sar = state.sar + state.af * (state.ep - state.sar)
     reverse = False
 
     if state.falling:
-        # Adjust SAR to not exceed previous highs
-        new_sar = min(new_sar, state.prev_high)
-
-        # Check for reversal
-        if high > new_sar:
-            reverse = True
-            new_sar = state.ep
-            state.ep = high
-            state.af = state.af0
-            state.falling = False
-        else:
-            # Update EP and AF if new low
-            if low < state.ep:
-                state.ep = low
-                state.af = min(state.af + state.af0, state.max_af)
-    else:
-        # Adjust SAR to not go below previous lows
-        new_sar = max(new_sar, state.prev_low)
-
-        # Check for reversal
-        if low < new_sar:
-            reverse = True
-            new_sar = state.ep
+        reverse = high > sar
+        if low < state.ep:
             state.ep = low
-            state.af = state.af0
-            state.falling = True
-        else:
-            # Update EP and AF if new high
-            if high > state.ep:
-                state.ep = high
-                state.af = min(state.af + state.af0, state.max_af)
+            state.af = min(state.af + state.af0, state.max_af)
+        sar = max(state.prev_high, sar)
+    else:
+        reverse = low < sar
+        if high > state.ep:
+            state.ep = high
+            state.af = min(state.af + state.af0, state.max_af)
+        sar = min(state.prev_low, sar)
 
-    state.sar = new_sar
+    if reverse:
+        sar = state.ep
+        state.af = state.af0
+        state.falling = not state.falling
+        state.ep = low if state.falling else high
+
+    state.sar = sar
     state.prev_high = high
     state.prev_low = low
     state.prev_close = close

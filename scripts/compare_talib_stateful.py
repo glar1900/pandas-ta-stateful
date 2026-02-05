@@ -7,7 +7,13 @@ vectorized results (talib=True) to stateful incremental results.
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from typing import List
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 import numpy as np
 import pandas as pd

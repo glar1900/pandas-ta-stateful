@@ -1314,13 +1314,12 @@ def _crsi_update(
     close = bar["close"]
     prev_close = state.prev_close
 
-    # --- Streak calculation ---
+    # --- Streak calculation (matches consecutive_streak = sign(diff)) ---
     if prev_close is not None:
         if close > prev_close:
-            state.streak = (state.streak + 1) if state.streak >= 0 else 1
+            state.streak = 1
         elif close < prev_close:
-            state.streak = (state.streak - 1) if state.streak <= 0 else -1
-        # close == prev_close: streak stays at 0 if was 0, else resets
+            state.streak = -1
         else:
             state.streak = 0
     state.prev_close = close
