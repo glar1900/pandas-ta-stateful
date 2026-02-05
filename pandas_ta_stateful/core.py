@@ -974,10 +974,12 @@ class AnalysisIndicators(object):
 
             use_stateful_update = True
             if seed_mode and state_timestamp is None and not is_lookahead and not stateful_only:
-                # Seed-only full run: use vectorized outputs for speed
-                # Skip vectorized for replay_only indicators to preserve exact state parity.
-                use_stateful_update = False
-                if kind not in replay_only_kinds:
+                # Seed-only full run: use vectorized outputs for speed,
+                # but replay_only indicators must run statefully to produce outputs.
+                if kind in replay_only_kinds:
+                    use_stateful_update = True
+                else:
+                    use_stateful_update = False
                     vectorized_specs.append(spec)
 
             if not use_stateful_update:
