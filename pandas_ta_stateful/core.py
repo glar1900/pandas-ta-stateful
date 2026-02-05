@@ -326,12 +326,12 @@ class AnalysisIndicators(object):
                 if "time" in df.columns:
                     return df["time"]
                 if hasattr(df.index, "dtype") and df.index.dtype.name.startswith("datetime"):
-                    return df.index
+                    return df.index.to_series()
             if series == "time":
                 if "timestamp" in df.columns:
                     return df["timestamp"]
                 if hasattr(df.index, "dtype") and df.index.dtype.name.startswith("datetime"):
-                    return df.index
+                    return df.index.to_series()
             else:
                 # Attempt to match the 'series' because it was likely
                 # misspelled.

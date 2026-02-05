@@ -74,13 +74,14 @@ def main() -> None:
             append=False,
             returns=True,
             returns_state=False,
-            verbose=False,
-            timed=False,
+            verbose=True,
+            timed=True,
             ordered=True,
             cores=0,
             exclude=exclude,
             state=None,
             stateful_only=args.stateful_only,
+            progress=True,
         )
 
     # Timed runs
