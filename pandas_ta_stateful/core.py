@@ -924,6 +924,7 @@ class AnalysisIndicators(object):
         vectorized_specs = []
         combined_registry = {**STATEFUL_REGISTRY, **LOOKAHEAD_REGISTRY}
         lookahead_kinds = set(LOOKAHEAD_REGISTRY.keys())
+        replay_only_kinds = {k for k in combined_registry.keys() if k not in SEED_REGISTRY}
         for spec in specs:
             kind = spec.get("kind", None)
             if not isinstance(kind, str):
@@ -976,7 +977,7 @@ class AnalysisIndicators(object):
                 # Seed-only full run: use vectorized outputs for speed
                 # Skip vectorized for replay_only indicators to preserve exact state parity.
                 use_stateful_update = False
-                if kind not in REPLAY_ONLY:
+                if kind not in replay_only_kinds:
                     vectorized_specs.append(spec)
 
             if not use_stateful_update:
@@ -1064,7 +1065,7 @@ class AnalysisIndicators(object):
                 }
 
                 # Provide vectorized outputs for seed when available (non-lookahead)
-                if not item["is_lookahead"] and kind not in REPLAY_ONLY:
+                if not item["is_lookahead"] and kind not in replay_only_kinds:
                     call_spec = {
                         k: v for k, v in item["params"].items()
                         if k not in STATEFUL_SPEC_EXCLUDES
