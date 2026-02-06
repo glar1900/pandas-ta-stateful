@@ -1908,31 +1908,46 @@ def _pivots_init(params: Dict[str, Any]) -> PIVOTSState:
 
 def _session_key_from_bar(bar: Dict[str, Any], anchor: str) -> str:
     """Extract a session identifier from the bar.
-    If 'timestamp' is present use it; otherwise use a generic counter.
-    For anchor='D' we use the date portion of the timestamp.
+    Uses timestamp/time if present; otherwise returns empty string.
     """
-    ts = bar.get("timestamp")
-    if ts is not None:
-        # handle pandas Timestamp or datetime
+    ts = bar.get("timestamp", None)
+    if ts is None:
+        ts = bar.get("time", None)
+    if ts is None:
+        return ""
+
+    try:
+        import pandas as _pd
+        import numpy as _np
+        import datetime as _dt
+        # normalize to pandas Timestamp
+        if isinstance(ts, _pd.Timestamp):
+            tsv = ts
+        elif isinstance(ts, _np.datetime64):
+            tsv = _pd.to_datetime(ts)
+        elif isinstance(ts, (_dt.datetime, _dt.date)):
+            tsv = _pd.to_datetime(ts)
+        elif isinstance(ts, (int, float)):
+            # Heuristic for epoch units
+            unit = "s"
+            if abs(ts) > 1e14:
+                unit = "ns"
+            elif abs(ts) > 1e11:
+                unit = "ms"
+            tsv = _pd.to_datetime(ts, unit=unit, errors="coerce")
+        else:
+            tsv = _pd.to_datetime(ts, errors="coerce")
+
+        if _pd.isna(tsv):
+            return ""
+
+        anch = anchor.upper() if anchor else "D"
         try:
-            if anchor.upper() in ("D",):
-                return str(ts)[:10]  # YYYY-MM-DD
-            elif anchor.upper() in ("W", "WE"):
-                # ISO week
-                import datetime
-                if hasattr(ts, "isocalendar"):
-                    iso = ts.isocalendar()
-                    return f"{iso[0]}-W{iso[1]}"
-                return str(ts)[:10]
-            elif anchor.upper() in ("M", "ME"):
-                return str(ts)[:7]  # YYYY-MM
-            elif anchor.upper() in ("Y", "YE"):
-                return str(ts)[:4]  # YYYY
+            return str(tsv.to_period(anch))
         except Exception:
-            pass
-        return str(ts)[:10]
-    # fallback: no timestamp -- cannot detect session change
-    return ""
+            return str(tsv.to_period("D"))
+    except Exception:
+        return ""
 
 
 def _compute_pivots(method: str, o: float, h: float, lo: float, cl: float) -> List[float]:
@@ -2074,50 +2089,121 @@ def _pivots_output_names(params: Dict[str, Any]) -> List[str]:
 
 
 def _pivots_seed(series: Dict[str, Any], params: Dict[str, Any]) -> PIVOTSState:
-    """internal_series seed: recover session state from OHLC tails."""
+    """internal_series seed: rebuild session state from OHLC + timestamps."""
     state = _pivots_init(params)
-    # Try to recover current pivot levels from the output series
-    names = _pivots_output_names(params)
-    # P column
-    p_s = series.get(names[0])
-    if p_s is not None:
-        lv = p_s.dropna()
-        if len(lv) > 0:
-            # levels are all held constant within a session; extract last row
-            state.levels = []
-            for n in names:
-                col = series.get(n)
-                if col is not None and len(col) > 0:
-                    state.levels.append(float(col.iloc[-1]))
-                else:
-                    state.levels.append(NAN)
 
-    # Recover current session OHLC from raw series tails
-    # (last bar of each raw series)
-    for raw_key, attr in [("open", "cur_open"), ("high", "cur_high"),
-                          ("low", "cur_low"), ("close", "cur_close")]:
-        raw_s = series.get(raw_key)
-        if raw_s is not None and len(raw_s) > 0:
-            setattr(state, attr, float(raw_s.iloc[-1]))
+    o = series.get("open")
+    h = series.get("high")
+    lo = series.get("low")
+    cl = series.get("close")
+    if o is None or h is None or lo is None or cl is None:
+        return state
+    if len(cl) == 0:
+        return state
 
-    # session_key: try to extract from index
-    # If the series have a DatetimeIndex we can get the last date
-    for raw_key in ("close", "open"):
-        raw_s = series.get(raw_key)
-        if raw_s is not None and len(raw_s) > 0:
-            idx = raw_s.index[-1]
+    # Resolve timestamp series: prefer explicit timestamp/time, then index.
+    ts = series.get("timestamp")
+    if ts is None:
+        ts = series.get("time")
+    if ts is None:
+        ts = getattr(cl, "index", None)
+
+    # Convert to Series for vectorized period grouping when possible
+    try:
+        import pandas as _pd
+        import numpy as _np
+
+        if ts is not None and not isinstance(ts, _pd.Series):
             try:
-                state.session_key = str(idx)[:10]
+                ts = _pd.Series(ts, index=cl.index)
             except Exception:
-                pass
-            break
+                ts = _pd.Series(ts)
 
-    return state
+        if ts is None:
+            # No timestamp data; fall back to last bar only (no pivots)
+            state.cur_open = float(o.iloc[-1])
+            state.cur_high = float(h.iloc[-1])
+            state.cur_low = float(lo.iloc[-1])
+            state.cur_close = float(cl.iloc[-1])
+            return state
+
+        dt = _pd.to_datetime(ts, errors="coerce")
+        # Remove tz for consistent period behavior
+        try:
+            if getattr(dt.dt, "tz", None) is not None:
+                dt = dt.dt.tz_convert(None)
+        except Exception:
+            pass
+
+        anchor = state.anchor.upper() if state.anchor else "D"
+        try:
+            periods = dt.dt.to_period(anchor)
+        except Exception:
+            periods = dt.dt.to_period("D")
+
+        valid = periods.notna()
+        if not bool(valid.any()):
+            state.cur_open = float(o.iloc[-1])
+            state.cur_high = float(h.iloc[-1])
+            state.cur_low = float(lo.iloc[-1])
+            state.cur_close = float(cl.iloc[-1])
+            return state
+
+        # Use last valid session key
+        last_pos = int(_np.flatnonzero(valid.to_numpy())[-1])
+        last_key = periods.iloc[last_pos]
+        state.session_key = str(last_key)
+
+        # Current session OHLC
+        cur_mask = periods == last_key
+        cur_o = o[cur_mask].dropna()
+        cur_h = h[cur_mask].dropna()
+        cur_l = lo[cur_mask].dropna()
+        cur_c = cl[cur_mask].dropna()
+        if len(cur_o) > 0:
+            state.cur_open = float(cur_o.iloc[0])
+        if len(cur_h) > 0:
+            state.cur_high = float(cur_h.max())
+        if len(cur_l) > 0:
+            state.cur_low = float(cur_l.min())
+        if len(cur_c) > 0:
+            state.cur_close = float(cur_c.iloc[-1])
+
+        # Previous session OHLC -> compute active pivot levels
+        uniq = periods[valid].unique()
+        if len(uniq) >= 2:
+            prev_key = uniq[-2]
+            prev_mask = periods == prev_key
+            prev_o = o[prev_mask].dropna()
+            prev_h = h[prev_mask].dropna()
+            prev_l = lo[prev_mask].dropna()
+            prev_c = cl[prev_mask].dropna()
+            if len(prev_o) > 0 and len(prev_h) > 0 and len(prev_l) > 0 and len(prev_c) > 0:
+                state.prev_open = float(prev_o.iloc[0])
+                state.prev_high = float(prev_h.max())
+                state.prev_low = float(prev_l.min())
+                state.prev_close = float(prev_c.iloc[-1])
+                state.levels = _compute_pivots(
+                    state.method,
+                    state.prev_open, state.prev_high, state.prev_low, state.prev_close,
+                )
+
+        return state
+    except Exception:
+        # Safe fallback: last bar only, no pivots
+        try:
+            state.cur_open = float(o.iloc[-1])
+            state.cur_high = float(h.iloc[-1])
+            state.cur_low = float(lo.iloc[-1])
+            state.cur_close = float(cl.iloc[-1])
+        except Exception:
+            pass
+        return state
 
 
 STATEFUL_REGISTRY["pivots"] = StatefulIndicator(
     kind="pivots",
-    inputs=("open", "high", "low", "close"),
+    inputs=("open", "high", "low", "close", "timestamp"),
     init=_pivots_init,
     update=_pivots_update,
     output_names=_pivots_output_names,

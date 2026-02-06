@@ -938,57 +938,39 @@ def _vwap_init(params: Dict[str, Any]) -> VWAPState:
 
 
 def _vwap_session_key(timestamp: float, anchor: str) -> Any:
-    """Derive a session key from a numeric timestamp and anchor string.
-
-    Supported anchors (case-insensitive prefix match):
-        D  – calendar day   (epoch // 86400)
-        W  – ISO week       (epoch // 604800)
-        M  – calendar month (year*100 + month, approximate via epoch)
-        H  – hour           (epoch // 3600)
-
-    Fallback: integer-truncate timestamp to day.
-    """
-    anchor_up = anchor.upper() if anchor else "D"
-
-    # Coerce timestamp to epoch seconds
-    ts = timestamp
-    try:
-        # numpy datetime64
-        import numpy as _np
-        if isinstance(ts, _np.datetime64):
-            ts = ts.astype("datetime64[ns]").astype("int64") / 1e9
-    except Exception:
-        pass
+    """Derive a session key using pandas Periods (aligns with vectorized vwap)."""
     try:
         import pandas as _pd
+        import numpy as _np
+        import datetime as _dt
+
+        ts = timestamp
         if isinstance(ts, _pd.Timestamp):
-            ts = ts.value / 1e9
-    except Exception:
-        pass
-    if isinstance(ts, _dt.datetime):
-        ts = ts.timestamp()
-    elif isinstance(ts, _dt.date):
-        ts = _dt.datetime(ts.year, ts.month, ts.day).timestamp()
-    else:
-        try:
-            ts = float(ts)
-        except Exception:
-            # If we cannot coerce, fall back to a stable key (no session change)
+            tsv = ts
+        elif isinstance(ts, _np.datetime64):
+            tsv = _pd.to_datetime(ts)
+        elif isinstance(ts, (_dt.datetime, _dt.date)):
+            tsv = _pd.to_datetime(ts)
+        elif isinstance(ts, (int, float)):
+            unit = "s"
+            if abs(ts) > 1e14:
+                unit = "ns"
+            elif abs(ts) > 1e11:
+                unit = "ms"
+            tsv = _pd.to_datetime(ts, unit=unit, errors="coerce")
+        else:
+            tsv = _pd.to_datetime(ts, errors="coerce")
+
+        if _pd.isna(tsv):
             return None
 
-    if anchor_up.startswith("D"):
-        return int(ts // 86400)
-    elif anchor_up.startswith("W"):
-        return int(ts // 604800)
-    elif anchor_up.startswith("H"):
-        return int(ts // 3600)
-    elif anchor_up.startswith("M"):
-        # Approximate month from epoch (good enough for session detection)
-        # Use days since epoch -> month boundaries are ~30.4375 days
-        return int(ts // (86400 * 30))
-    else:
-        # Unknown anchor: fall back to daily
-        return int(ts // 86400)
+        anch = anchor.upper() if anchor else "D"
+        try:
+            return str(tsv.to_period(anch))
+        except Exception:
+            return str(tsv.to_period("D"))
+    except Exception:
+        return None
 
 
 def _vwap_update(

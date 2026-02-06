@@ -289,97 +289,140 @@ SEED_REGISTRY["ichimoku"] = _ichimoku_seed
 
 
 # ===========================================================================
-# TOS_STDEVALL  (APPROXIMATE: expanding window with warning)
+# TOS_STDEVALL  (APPROXIMATE: online regression with warning)
 # ===========================================================================
 # TD Ameritrade's Think or Swim Standard Deviation All
 # Original uses all bars or last N bars for linear regression + std bands.
-# Stateful version uses EXPANDING window (growing) and emits warning.
+# Stateful version uses ONLINE regression/std (expanding or rolling).
 
 @dataclass
 class TosStdevallState:
-    """TOS_STDEVALL state using expanding window (approximate).
+    """TOS_STDEVALL state using O(1) online regression/std.
 
-    APPROXIMATION: The vectorized version computes linear regression and std
-    over ALL historical bars or a fixed window. In stateful mode, we use an
-    EXPANDING window that grows with each new bar. This means results will
-    differ from training data as the window keeps expanding. A runtime warning
-    is emitted on first update.
+    Uses expanding window by default. If length is provided, uses a rolling
+    window of that size. This still differs from vectorized snapshot behavior
+    but is suitable for streaming.
     """
-    stds: Tuple[int, ...]           # standard deviation bands
-    ddof: int                        # degrees of freedom for std
-    prices: List[float] = field(default_factory=list)
-    warned: bool = False             # track if warning was emitted
+    stds: Tuple[int, ...]
+    ddof: int
+    length: Optional[int] = None
+    # running sums
+    n: int = 0
+    sum_x: float = 0.0
+    sum_xx: float = 0.0
+    sum_y: float = 0.0
+    sum_y2: float = 0.0
+    sum_xy: float = 0.0
+    # rolling buffer (only when length is set)
+    y_buf: deque = field(default_factory=deque)
+    warned: bool = False
 
 
 def _tos_stdevall_init(params: Dict[str, Any]) -> TosStdevallState:
-    """Initialize TOS_STDEVALL with expanding window."""
+    """Initialize TOS_STDEVALL with online regression."""
     stds_param = params.get("stds", [1, 2, 3])
     if not isinstance(stds_param, (list, tuple)):
         stds_param = [1, 2, 3]
     stds = tuple(sorted(stds_param))
     ddof = _as_int(_param(params, "ddof", 1), 1)
+    length = _param(params, "length", None)
+    length = _as_int(length, 0) if length is not None else None
+    if length is not None and length <= 1:
+        length = None
 
-    return TosStdevallState(stds=stds, ddof=ddof)
+    state = TosStdevallState(stds=stds, ddof=ddof, length=length)
+    if length:
+        state.y_buf = deque(maxlen=length)
+    return state
 
 
 def _tos_stdevall_update(
     state: TosStdevallState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], TosStdevallState]:
-    """Update TOS_STDEVALL using expanding window.
-
-    Returns: [lr, L_1, U_1, L_2, U_2, ...] for each std band.
-
-    Warning: This is an APPROXIMATION. The expanding window grows with each
-    bar, unlike the vectorized version which uses a fixed historical window.
-    Results will differ from training data.
-    """
-    close = bar["close"]
+    """Update TOS_STDEVALL using O(1) online regression/std."""
+    close = float(bar["close"])
 
     # Emit warning once per state instance
     if not state.warned:
         warnings.warn(
-            "TOS_STDEVALL in stateful mode uses EXPANDING window (approximate). "
-            "Results will differ from vectorized training data which uses a fixed window.",
+            "TOS_STDEVALL in stateful mode uses online regression (expanding/rolling). "
+            "Results may differ from vectorized snapshot behavior.",
             UserWarning,
             stacklevel=2
         )
         state.warned = True
 
-    # Add price to expanding window
-    state.prices.append(close)
-    n = len(state.prices)
+    # Update running sums (expanding or rolling)
+    if state.length is None:
+        # expanding
+        x = state.n  # zero-based
+        state.n += 1
+        state.sum_x += x
+        state.sum_xx += x * x
+        state.sum_y += close
+        state.sum_y2 += close * close
+        state.sum_xy += x * close
+        n = state.n
+    else:
+        # rolling
+        L = state.length
+        if len(state.y_buf) < L:
+            x = len(state.y_buf)
+            state.y_buf.append(close)
+            state.n = len(state.y_buf)
+            state.sum_x += x
+            state.sum_xx += x * x
+            state.sum_y += close
+            state.sum_y2 += close * close
+            state.sum_xy += x * close
+        else:
+            y0 = state.y_buf[0]
+            state.y_buf.append(close)
+            # update sums for sliding window
+            old_sum_y = state.sum_y
+            state.sum_y = state.sum_y - y0 + close
+            state.sum_y2 = state.sum_y2 - y0 * y0 + close * close
+            state.sum_xy = state.sum_xy - old_sum_y + y0 + (L - 1) * close
+            state.n = L
+        n = state.n
 
-    # Need at least 2 points for linear regression
+    # Need at least 2 points for regression/std
     if n < 2:
-        # Return None for all outputs
-        num_outputs = 1 + 2 * len(state.stds)  # LR + (L_i, U_i) for each std
+        num_outputs = 1 + 2 * len(state.stds)
         return [None] * num_outputs, state
 
-    # Linear regression: y = mx + b
-    # Using simple least squares
-    x_vals = list(range(n))
-    sum_x = sum(x_vals)
-    sum_y = sum(state.prices)
-    sum_xx = sum(x * x for x in x_vals)
-    sum_xy = sum(x * y for x, y in zip(x_vals, state.prices))
+    # Compute regression coefficients
+    if state.length is None:
+        sum_x = state.sum_x
+        sum_xx = state.sum_xx
+    else:
+        sum_x = n * (n - 1) / 2.0
+        sum_xx = (n - 1) * n * (2 * n - 1) / 6.0
 
-    # Slope and intercept
-    m = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x)
-    b = (sum_y - m * sum_x) / n
+    denom = n * sum_xx - sum_x * sum_x
+    if denom == 0.0:
+        m = 0.0
+    else:
+        m = (n * state.sum_xy - sum_x * state.sum_y) / denom
+    b = (state.sum_y - m * sum_x) / n
 
-    # Current LR value (at position n-1)
-    lr = m * (n - 1) + b
+    # Regression value at latest x
+    x_cur = n - 1
+    lr = m * x_cur + b
 
-    # Calculate standard deviation
-    mean_price = sum_y / n
-    variance = sum((p - mean_price) ** 2 for p in state.prices) / (n - state.ddof)
-    stdev = variance ** 0.5
+    # Standard deviation of y
+    if n <= state.ddof:
+        stdev = 0.0
+    else:
+        var = (state.sum_y2 - (state.sum_y * state.sum_y) / n) / (n - state.ddof)
+        if var < 0.0:
+            var = 0.0
+        stdev = var ** 0.5
 
-    # Build output list: [lr, L_1, U_1, L_2, U_2, ...]
     outputs: List[Optional[float]] = [lr]
     for std_mult in state.stds:
-        outputs.append(lr - std_mult * stdev)  # Lower band
-        outputs.append(lr + std_mult * stdev)  # Upper band
+        outputs.append(lr - std_mult * stdev)
+        outputs.append(lr + std_mult * stdev)
 
     return outputs, state
 
@@ -416,48 +459,95 @@ SEED_REGISTRY["tos_stdevall"] = _tos_stdevall_seed
 
 
 # ===========================================================================
-# VP  (APPROXIMATE: expanding window Volume Profile with warning)
+# VP  (APPROXIMATE: online histogram with warning)
 # ===========================================================================
 # Volume Profile bins price/volume into ranges.
 # Original is a distribution snapshot, not a time series.
-# Stateful version uses EXPANDING window VP and emits warning.
+# Stateful version uses a fixed-width histogram (approximate).
 
 @dataclass
 class VPState:
-    """VP state using expanding window (approximate).
-
-    APPROXIMATION: Volume Profile is NOT a time series indicator but a
-    distribution snapshot. The vectorized version bins price/volume over a
-    fixed historical period. In stateful mode, we use an EXPANDING window
-    that grows with each bar, making this a very rough approximation. Results
-    will differ significantly from training data. A runtime warning is emitted
-    on first update.
-    """
-    width: int                       # number of price bins
-    prices: List[float] = field(default_factory=list)
-    volumes: List[float] = field(default_factory=list)
-    warned: bool = False             # track if warning was emitted
+    """VP state using fixed-width histogram (approximate)."""
+    width: int
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    pos_bins: List[float] = field(default_factory=list)
+    neg_bins: List[float] = field(default_factory=list)
+    neut_bins: List[float] = field(default_factory=list)
+    sum_bins: List[float] = field(default_factory=list)
+    count_bins: List[float] = field(default_factory=list)
+    last_close: Optional[float] = None
+    warned: bool = False
 
 
 def _vp_init(params: Dict[str, Any]) -> VPState:
     """Initialize VP with expanding window."""
     width = _as_int(_param(params, "width", 10), 10)
-    return VPState(width=width)
+    state = VPState(width=width)
+    state.pos_bins = [0.0] * width
+    state.neg_bins = [0.0] * width
+    state.neut_bins = [0.0] * width
+    state.sum_bins = [0.0] * width
+    state.count_bins = [0.0] * width
+    return state
+
+
+def _vp_bin_index(price: float, min_p: float, max_p: float, width: int) -> int:
+    if max_p <= min_p:
+        return width // 2
+    pos = (price - min_p) / (max_p - min_p)
+    idx = int(pos * width)
+    if idx < 0:
+        return 0
+    if idx >= width:
+        return width - 1
+    return idx
+
+
+def _vp_rebin(state: VPState, new_min: float, new_max: float) -> None:
+    if state.min_price is None or state.max_price is None:
+        state.min_price = new_min
+        state.max_price = new_max
+        return
+    old_min = state.min_price
+    old_max = state.max_price
+    width = state.width
+    if old_max <= old_min:
+        state.min_price = new_min
+        state.max_price = new_max
+        return
+
+    pos_new = [0.0] * width
+    neg_new = [0.0] * width
+    neut_new = [0.0] * width
+    sum_new = [0.0] * width
+    count_new = [0.0] * width
+
+    old_w = (old_max - old_min) / width
+    for i in range(width):
+        center = old_min + (i + 0.5) * old_w
+        j = _vp_bin_index(center, new_min, new_max, width)
+        pos_new[j] += state.pos_bins[i]
+        neg_new[j] += state.neg_bins[i]
+        neut_new[j] += state.neut_bins[i]
+        sum_new[j] += state.sum_bins[i]
+        count_new[j] += state.count_bins[i]
+
+    state.pos_bins = pos_new
+    state.neg_bins = neg_new
+    state.neut_bins = neut_new
+    state.sum_bins = sum_new
+    state.count_bins = count_new
+    state.min_price = new_min
+    state.max_price = new_max
 
 
 def _vp_update(
     state: VPState, bar: Dict[str, Any], params: Dict[str, Any]
 ) -> Tuple[List[Optional[float]], VPState]:
-    """Update VP using expanding window.
-
-    Returns: [low_price, mean_price, high_price, pos_volume, neg_volume,
-              neut_volume, total_volume] for the most active bin.
-
-    Warning: This is an APPROXIMATION. The expanding window grows with each
-    bar. Results will differ significantly from vectorized training data.
-    """
-    close = bar["close"]
-    volume = bar["volume"]
+    """Update VP using fixed-width histogram."""
+    close = float(bar["close"])
+    volume = float(bar["volume"])
 
     # Emit warning once per state instance
     if not state.warned:
@@ -470,102 +560,75 @@ def _vp_update(
         )
         state.warned = True
 
-    # Add to expanding window
-    state.prices.append(close)
-    state.volumes.append(volume)
-    n = len(state.prices)
+    # Update min/max and re-bin if needed
+    if state.min_price is None or state.max_price is None:
+        state.min_price = close
+        state.max_price = close
+    else:
+        new_min = min(state.min_price, close)
+        new_max = max(state.max_price, close)
+        if new_min != state.min_price or new_max != state.max_price:
+            _vp_rebin(state, new_min, new_max)
 
-    # Need at least width bars to create meaningful bins
-    if n < state.width:
+    # Determine sign (signed_series with initial=1)
+    if state.last_close is None:
+        sign = 1.0
+    else:
+        if close > state.last_close:
+            sign = 1.0
+        elif close < state.last_close:
+            sign = -1.0
+        else:
+            sign = 0.0
+    state.last_close = close
+
+    idx = _vp_bin_index(close, state.min_price, state.max_price, state.width)
+    if sign > 0:
+        state.pos_bins[idx] += volume
+    elif sign < 0:
+        state.neg_bins[idx] += volume
+    else:
+        state.neut_bins[idx] += volume
+    state.sum_bins[idx] += close
+    state.count_bins[idx] += 1.0
+
+    # Find max-volume bin
+    max_idx = None
+    max_total = None
+    for i in range(state.width):
+        total = state.pos_bins[i] + state.neg_bins[i] + state.neut_bins[i]
+        if max_total is None or total > max_total:
+            max_total = total
+            max_idx = i
+
+    if max_idx is None:
         return [None] * 7, state
 
-    # Calculate price direction
-    prev_close = state.prices[-2] if n > 1 else close
-    price_change = close - prev_close
-
-    if price_change > 0:
-        pos_vol = volume
-        neg_vol = 0.0
-    elif price_change < 0:
-        pos_vol = 0.0
-        neg_vol = volume
+    # Compute bin boundaries and stats
+    if state.max_price <= state.min_price:
+        low_p = high_p = state.min_price
     else:
-        pos_vol = 0.0
-        neg_vol = 0.0
+        bin_w = (state.max_price - state.min_price) / state.width
+        low_p = state.min_price + max_idx * bin_w
+        high_p = low_p + bin_w
 
-    # Bin the data
-    min_price = min(state.prices)
-    max_price = max(state.prices)
-
-    # Avoid division by zero
-    if max_price == min_price:
-        price_range = 1.0
+    if state.count_bins[max_idx] > 0:
+        mean_price = state.sum_bins[max_idx] / state.count_bins[max_idx]
     else:
-        price_range = max_price - min_price
+        mean_price = 0.5 * (low_p + high_p)
 
-    bin_width = price_range / state.width
-
-    # Initialize bins
-    bins = [
-        {
-            "low": min_price + i * bin_width,
-            "high": min_price + (i + 1) * bin_width,
-            "pos_vol": 0.0,
-            "neg_vol": 0.0,
-            "neut_vol": 0.0,
-            "count": 0,
-            "price_sum": 0.0,
-        }
-        for i in range(state.width)
-    ]
-
-    # Assign each price/volume to a bin
-    for i, (p, v) in enumerate(zip(state.prices, state.volumes)):
-        # Determine bin index
-        if p == max_price:
-            bin_idx = state.width - 1
-        else:
-            bin_idx = min(int((p - min_price) / bin_width), state.width - 1)
-
-        bins[bin_idx]["count"] += 1
-        bins[bin_idx]["price_sum"] += p
-
-        # Determine volume direction
-        if i > 0:
-            prev_p = state.prices[i - 1]
-            if p > prev_p:
-                bins[bin_idx]["pos_vol"] += v
-            elif p < prev_p:
-                bins[bin_idx]["neg_vol"] += v
-            else:
-                bins[bin_idx]["neut_vol"] += v
-        else:
-            bins[bin_idx]["neut_vol"] += v
-
-    # Find bin with highest total volume
-    max_vol = 0.0
-    max_bin = bins[0]
-    for b in bins:
-        total_vol = b["pos_vol"] + b["neg_vol"] + b["neut_vol"]
-        if total_vol > max_vol:
-            max_vol = total_vol
-            max_bin = b
-
-    # Calculate mean price for the bin
-    if max_bin["count"] > 0:
-        mean_price = max_bin["price_sum"] / max_bin["count"]
-    else:
-        mean_price = 0.5 * (max_bin["low"] + max_bin["high"])
-
-    total_volume = max_bin["pos_vol"] + max_bin["neg_vol"]
+    pos_vol = state.pos_bins[max_idx]
+    neg_vol = state.neg_bins[max_idx]
+    neut_vol = state.neut_bins[max_idx]
+    total_volume = pos_vol + neg_vol
 
     return [
-        max_bin["low"],
+        low_p,
         mean_price,
-        max_bin["high"],
-        max_bin["pos_vol"],
-        max_bin["neg_vol"],
-        max_bin["neut_vol"],
+        high_p,
+        pos_vol,
+        neg_vol,
+        neut_vol,
         total_volume,
     ], state
 

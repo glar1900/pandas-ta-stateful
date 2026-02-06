@@ -677,7 +677,8 @@ class HtTrendlineState:
 
 
 def _ht_trendline_init(params: Dict[str, Any]) -> HtTrendlineState:
-    use_talib = bool(_param(params, "talib", True)) and Imports.get("talib", False)
+    # Default to internal incremental implementation for performance.
+    use_talib = bool(_param(params, "talib", False)) and Imports.get("talib", False)
     return HtTrendlineState(use_talib=use_talib)
 
 

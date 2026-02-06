@@ -26,7 +26,7 @@ import pandas_ta_stateful as ta
 
 
 DEFAULT_EXCLUDE = ["long_run", "short_run", "tsignals", "xsignals"]
-DEFAULT_DROP_PREFIXES = ("TOS_",)
+DEFAULT_DROP_PREFIXES = () #("TOS_",)
 
 
 def make_ohlcv(rows: int, seed: int) -> pd.DataFrame:
@@ -82,8 +82,8 @@ def compare_frames(ref: pd.DataFrame, test: pd.DataFrame, eps: float) -> pd.Data
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rows", type=int, default=5011)
-    ap.add_argument("--split", type=int, default=5005, help="seed end index")
+    ap.add_argument("--rows", type=int, default=10011)
+    ap.add_argument("--split", type=int, default=10005, help="seed end index")
     ap.add_argument("--tail", type=int, default=10, help="compare last N rows (combined)")
     ap.add_argument("--seed-tail", type=int, default=5, help="compare last N rows of seed segment")
     ap.add_argument("--inc-tail", type=int, default=5, help="compare first N rows of incremental segment")

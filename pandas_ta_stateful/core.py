@@ -318,20 +318,24 @@ class AnalysisIndicators(object):
             return df[self.adjusted] if self.adjusted is not None else None
         # Ok.  So it's a str.
         elif isinstance(series, str):
+            # Special handling for time-like inputs
+            if series == "timestamp":
+                if hasattr(df.index, "dtype") and df.index.dtype.name.startswith("datetime"):
+                    return df.index.to_series()
+                if "time" in df.columns:
+                    return df["time"]
+                if "timestamp" in df.columns:
+                    return df["timestamp"]
+            if series == "time":
+                if hasattr(df.index, "dtype") and df.index.dtype.name.startswith("datetime"):
+                    return df.index.to_series()
+                if "time" in df.columns:
+                    return df["time"]
+                if "timestamp" in df.columns:
+                    return df["timestamp"]
             # Return the df column since it's in there.
             if series in df.columns:
                 return df[series]
-            # Fallbacks for time/timestamp convenience
-            if series == "timestamp":
-                if "time" in df.columns:
-                    return df["time"]
-                if hasattr(df.index, "dtype") and df.index.dtype.name.startswith("datetime"):
-                    return df.index.to_series()
-            if series == "time":
-                if "timestamp" in df.columns:
-                    return df["timestamp"]
-                if hasattr(df.index, "dtype") and df.index.dtype.name.startswith("datetime"):
-                    return df.index.to_series()
             else:
                 # Attempt to match the 'series' because it was likely
                 # misspelled.
