@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from importlib.metadata import version
-version = version("pandas-ta")
+version = version("pandas-ta-stateful")
 
 from pandas_ta_stateful.maps import EXCHANGE_TZ, RATE, Category, Imports
 from pandas_ta_stateful.utils import *
